@@ -37,16 +37,12 @@ services:
       context: .
       dockerfile: ./scripts/Dockerfile
     container_name: rpg-migrator
+    env_file:
+      - .env
     environment:
       - PG_HOST=rpg-postgres
       - PG_PORT=5432
-      - PG_DB=${PG_DB}
-      - PG_USER=${PG_USER}
-      - PG_PASSWORD=${PG_PASSWORD}
-      - RAVEN_URL=${RAVEN_URL}
-      - RAVEN_DB=${RAVEN_DB}
       - RAVEN_CERT_FILE=/app/scripts/${RAVEN_CERT_FILE}
-      - RAVEN_CERT_PASSWORD=${RAVEN_CERT_PASSWORD}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

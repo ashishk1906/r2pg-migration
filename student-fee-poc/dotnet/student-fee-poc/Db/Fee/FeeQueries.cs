@@ -27,7 +27,7 @@ public static class FeeQueries
                 COALESCE(f.owner_id, f.parent_id) AS inst_id,
                 f.name,
                 COALESCE(f.display_text, f.name) AS display_text,
-                f.status,
+                f.status::text AS status,
                 EXISTS (
                     SELECT 1 FROM fee_transaction ft 
                     WHERE EXISTS (

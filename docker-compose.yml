@@ -16,6 +16,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    profiles:
+      - local-db
 
   rpg-api:
     build:
@@ -26,11 +28,10 @@ services:
     ports:
       - "${API_PORT}:8080"
     environment:
-      - ConnectionStrings__Postgres=Host=rpg-postgres;Port=5432;Database=${PG_DB};Username=${PG_USER};Password=${PG_PASSWORD}
+      - ConnectionStrings__Postgres=Host=host.docker.internal;Port=${PG_PORT};Database=${PG_DB};Username=${PG_USER};Password=${PG_PASSWORD}
       - ASPNETCORE_ENVIRONMENT=Development
-    depends_on:
-      rpg-postgres:
-        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   rpg-migrator:
     build:
@@ -40,14 +41,11 @@ services:
     env_file:
       - .env
     environment:
-      - PG_HOST=rpg-postgres
-      - PG_PORT=5432
+      - PG_HOST=host.docker.internal
+      - PG_PORT=${PG_PORT}
       - RAVEN_CERT_FILE=/app/scripts/${RAVEN_CERT_FILE}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      rpg-postgres:
-        condition: service_healthy
     profiles:
       - migration
       - tools
@@ -59,10 +57,9 @@ services:
       - ./student-fee-poc:/app
     working_dir: /app/dotnet/student-fee-poc-tests
     environment:
-      - ConnectionStrings__Postgres=Host=rpg-postgres;Port=5432;Database=${PG_DB};Username=${PG_USER};Password=${PG_PASSWORD}
-    depends_on:
-      rpg-postgres:
-        condition: service_healthy
+      - ConnectionStrings__Postgres=Host=host.docker.internal;Port=${PG_PORT};Database=${PG_DB};Username=${PG_USER};Password=${PG_PASSWORD}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: ["dotnet", "test"]
     profiles:
       - test

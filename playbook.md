@@ -1,212 +1,133 @@
 # Local Testing & Onboarding Playbook
 ## CT-RPG: RavenDB to PostgreSQL Migration & .NET 10 Web API
 
-A comprehensive, step-by-step playbook for developers and evaluators to configure credentials, start infrastructure, run migrations (via Docker or local CLI), execute automated .NET 10 test suites, and inspect database objects and REST API endpoints.
+A streamlined guide for developers to configure credentials, choose a database target (Local Docker or Kubernetes PgBouncer), run migrations, verify 100% data parity, and execute tests.
 
 ---
 
-## 1. Prerequisites
+## 1. Clone & Prerequisites
 
+### Clone Repository
+```bash
+git clone https://github.com/ashishk1906/r2pg-migration.git
+cd r2pg-migration
+```
+
+### Prerequisites
 - **Docker Desktop** (Running with Linux containers)
-- **RavenDB Client Certificate** (`.pfx` file if connecting to RavenDB Cloud HTTPS)
-- *(Optional)* **.NET 10 SDK & Python 3.12** (Only needed if running scripts/API directly on host machine without Docker)
+- **RavenDB Client Certificate** (`.pfx` file)
+- *(Optional)* Python 3.12 & .NET 10 SDK (only needed if running directly on host without Docker)
 
 ---
 
 ## 2. Configuration Setup
 
-All connection parameters are centralized in a single root **`.env`** file.
-
-### Step A: Create `.env` from Example Template
+### Step A: Create `.env`
 ```bash
 cp .env.example .env
 ```
 
-#### Placeholders Reference Table (`.env`)
-
-| Variable | Placeholder / Default | Description |
-|---|---|---|
-| `PG_PORT` | `15432` | Host port for Docker PostgreSQL port forwarding (maps `15432:5432` to avoid conflicts with local Postgres `5432`) |
-| `API_PORT` | `5000` | Host port for .NET 10 Web API |
-| `PG_DB` | `rpg` | Target PostgreSQL database name |
-| `PG_USER` | `postgres` | Target PostgreSQL username |
-| `PG_PASSWORD` | `<your-postgres-password>` | Target PostgreSQL password |
-| `RAVEN_URL` | `https://<your-cluster-name>.ravendb.cloud` | RavenDB instance URL |
-| `RAVEN_DB` | `<your-database-name>` (e.g. `rpg` or `BTL`) | Source RavenDB database name |
-| `RAVEN_CERT_FILE` | `certs/<your-client-cert>.pfx` | Client certificate path inside `scripts/certs/` |
-| `RAVEN_CERT_PASSWORD` | *(leave empty or set password)* | Certificate password (if protected) |
-
----
+| Variable | Local Docker (Default) | Kubernetes (PgBouncer) | Description |
+|---|---|---|---|
+| `PG_HOST` | `localhost` | `localhost` | PostgreSQL host |
+| `PG_PORT` | `15432` | `6432` | PostgreSQL port |
+| `PG_DB` | `rpg` | `rpg` | Database name |
+| `PG_USER` | `postgres` | `postgres` | Username |
+| `PG_PASSWORD` | `postgres` | `<your-postgres-password>` | Target PostgreSQL password |
+| `RAVEN_URL` | `https://a.free.btl.ravendb.cloud` | `https://a.free.btl.ravendb.cloud` | RavenDB instance URL |
+| `RAVEN_DB` | `BTL` | `BTL` | Source RavenDB database name |
+| `RAVEN_CERT_FILE` | `certs/free.btl.client.certificate.pfx` | `certs/free.btl.client.certificate.pfx` | Client certificate path inside `scripts/certs/` |
 
 ### Step B: Place RavenDB Certificate
-If connecting to RavenDB Cloud (HTTPS), download the client certificate from the shared Google Drive:
- **[Download RavenDB Client Certificate (.pfx)](https://drive.google.com/file/d/1tcdrDU3Q1zzWBqs-BS0_0PGGvXjR2INI/view?usp=drive_link)**
-
-Copy the downloaded `.pfx` certificate into:
+Download the client certificate from **[Google Drive](https://drive.google.com/file/d/1tcdrDU3Q1zzWBqs-BS0_0PGGvXjR2INI/view?usp=drive_link)** and place it into:
 ```text
-scripts/
-└── certs/
-    └── <your-client-certificate>.pfx
+scripts/certs/<your-client-certificate>.pfx
 ```
-*(All `.pfx` certificate files in this directory are automatically ignored by Git for security).*
+*(All `.pfx` certificate files in this directory are automatically ignored by Git).*
 
 ---
 
-### Step C: Local Host `appsettings.json` *(Only for Local Devs without Docker)*
-When running via **Docker Compose**, connection strings are injected automatically from `.env`.
+## 3. Database Target (Choose Option A or B)
 
-If you choose to run or debug the .NET 10 API and tests **directly on your host machine** (via Visual Studio, Rider, or `dotnet run`), configure the connection string with your password in:
-- `student-fee-poc/dotnet/student-fee-poc/appsettings.json`
-- `student-fee-poc/dotnet/student-fee-poc-tests/appsettings.json`
-
-```json
-{
-  "ConnectionStrings": {
-    "Postgres": "Host=localhost;Port=15432;Database=rpg;Username=postgres;Password=<your-postgres-password>"
-  }
-}
-```
-
----
-
-## 3. Primary Execution Flow: Docker Approach (Zero-Config)
-
-Follow these steps in order:
-
-### Step 1: Check Out the Repository into Local
-Check out the repository into your local development machine and navigate into the project root directory.
-
----
-
-### Step 2: Start PostgreSQL & .NET 10 Web API
-
-> [!TIP]
-> **Port Forwarding & Zero Conflict:**
-> PostgreSQL host port forwarding is controlled via `PG_PORT` in `.env` (defaulting to `15432:5432`). If you have a local PostgreSQL instance running on `5432`, there is no conflict! If you prefer another port, simply adjust `PG_PORT` in `.env`.
-
-Start the PostgreSQL 16 database and ASP.NET Core 10 Web API container:
+### Option A: Local Docker PostgreSQL (Zero-Config)
+Start the local PostgreSQL container on port `15432`:
 ```bash
-docker compose up -d --build rpg-postgres rpg-api
+docker compose --profile local-db up -d rpg-postgres
 ```
 
-#### 🔌 Connect pgAdmin to PostgreSQL:
-Right after running this step, connect pgAdmin to the running Docker database:
-1. Open **pgAdmin**.
-2. In the left browser tree, right-click **Servers** ➔ **Register** ➔ **Server...**
-3. In the **General** tab:
-   - **Name**: `Docker RPG (Port 15432)`
-4. In the **Connection** tab:
-   - **Host name/address**: `localhost` (or `127.0.0.1`)
-   - **Port**: **`15432`**
-   - **Maintenance database**: `rpg`
-   - **Username**: `postgres`
-   - **Password**: `<your-postgres-password>` *(configured in `.env`)*
-5. Click **Save**.
-6. The `rpg` database is now connected. *(Tables will be populated after Step 3).*
+### Option B: Remote Kubernetes PostgreSQL (via PgBouncer)
+1. **Enable wildcard routing** on PgBouncer (one-time setup so it accepts the `rpg` database):
+   ```bash
+   kubectl set env deployment/pgbouncer -n test PGBOUNCER_DATABASE="*"
+   kubectl rollout status deployment/pgbouncer -n test
+   ```
+2. **Start port-forwarding** in a separate terminal:
+   ```bash
+   kubectl port-forward svc/pgbouncer-svc -n test 6432:6432
+   ```
+   *(Ensure `.env` has `PG_PORT=6432` and `PG_PASSWORD=<your-postgres-password>`)*.
 
 ---
 
-### Step 3: Run Data Migration via Docker
-Runs the Python ETL pipeline to extract data from RavenDB, dynamically create PostgreSQL base tables, transform documents, and apply indexes, views, and triggers:
+## 4. Run Migration & Parity Verification
 
+### Step 1: Run Data Migration
+Runs the Python ETL pipeline to create base tables, transform documents, and apply indexes, views, and triggers:
 ```bash
-# Run all 6 migration modules (personas, courses, staffs, students, fees, exams):
+# Run all 6 modules via Docker:
 docker compose run --rm rpg-migrator --all
+
+# (Or run directly on host: python scripts/migrate_all.py --all)
 ```
+> **Selective Migration**: To run only specific modules:  
+> `docker compose run --rm rpg-migrator --module student,fees`
 
-> **Selective Module Migration**: To run only specific modules (e.g. Students and Fees):
-> ```bash
-> docker compose run --rm rpg-migrator --module student,fees
-> ```
-
-> **View Migrated Tables in pgAdmin**: After migration finishes, in pgAdmin expand `Docker RPG (Port 15432)` ➔ `Databases` ➔ `rpg` ➔ `Schemas` ➔ `public`, then right-click **Tables** and click **Refresh** (or press `F5`) to view all 9 tables and views!
-
----
-
-### Step 4: Verify Data Parity (RavenDB vs PostgreSQL)
-Run the automated parity verification script to perform a 100% field-by-field audit across all 9 domains:
+### Step 2: Verify 100% Data Parity
+Audit all 9 domains field-by-field against RavenDB:
 ```bash
 python scripts/verify_raven_to_postgres.py
 ```
 
 ---
 
-### Step 5: Run Automated Tests (.NET 10)
-Executes all xUnit unit & integration tests inside the official .NET 10 container (automatically pulls database connection settings from `.env`):
+## 5. Start Web API & Run Tests
+
+### Step 1: Start .NET 10 Web API
+```bash
+docker compose up -d --build rpg-api
+```
+Open **Swagger UI** in your browser: 👉 **[http://localhost:5000](http://localhost:5000)**
+
+Quick API check in terminal:
+```bash
+curl -s http://localhost:5000/health
+curl -s "http://localhost:5000/api/stu/student?limit=2"
+```
+
+### Step 2: Run Automated Tests
+Execute all xUnit integration & unit tests inside the .NET 10 container:
 ```bash
 docker compose run --rm rpg-tests
 ```
 
 ---
 
-### Step 6: Verify REST APIs & Swagger UI
+## 6. Database Inspection (pgAdmin & SQL)
 
-Open your browser to interactively test the API via Swagger UI:
-👉 **[http://localhost:5000](http://localhost:5000)**
+### Connect pgAdmin:
+1. In pgAdmin, right-click **Servers** ➔ **Register** ➔ **Server...**
+2. In **Connection** tab:
+   - **Host name/address**: `localhost`
+   - **Port**: `15432` (Option A) or `6432` (Option B)
+   - **Maintenance database**: `rpg`
+   - **Username**: `postgres`
+   - **Password**: `<your-postgres-password>`
 
-Or verify endpoints directly in your terminal:
-```bash
-# 1. Health check:
-curl.exe -s http://localhost:5000/health
+### Verification SQL Queries:
+Run in pgAdmin Query Tool or `psql` to verify data integrity:
 
-# 2. CampusTrack Students endpoint (matching /api/stu/student):
-curl.exe -s "http://localhost:5000/api/stu/student?limit=2"
-
-# 3. CampusTrack Fee Transactions endpoint (matching /api/feeTx):
-curl.exe -s "http://localhost:5000/api/feeTx?limit=2"
-
-# 4. CampusTrack Fee Definitions endpoint (matching /api/fee):
-curl.exe -s "http://localhost:5000/api/fee?limit=2"
-
-# 5. Insert Fee Transaction (POST /api/feeTx write test with audit trigger):
-curl.exe -s -X POST "http://localhost:5000/api/feeTx" -H "Content-Type: application/json" -d "{\"studentId\": \"cc93c106-82ea-4610-9873-3db87f1307c6\", \"amount\": 500.00, \"status\": \"Active\", \"feeId\": \"a7e2851c-2321-4adc-993a-387deefee3a8\", \"refNo\": \"DEMO-CURL-01\"}"
-```
-
----
-
-## 4. Alternative Execution: Local Host Developer Workflow (Direct CLI)
-
-If you prefer running tools directly on your local host (outside Docker):
-
-### A. Python ETL Migration CLI
-1. Install requirements:
-   ```bash
-   pip install -r scripts/requirements.txt
-   ```
-2. Run master migration (automatically reads root `.env`):
-   ```bash
-   python scripts/migrate_all.py --all
-   ```
-3. Run individual module scripts directly:
-   ```bash
-   python scripts/students_ravendb_to_postgres_migrate.py
-   python scripts/fees_ravendb_to_postgres_migrate.py
-   python scripts/courses_ravendb_to_postgres_migrate.py
-   python scripts/staffs_ravendb_to_postgres_migrate.py
-   python scripts/personas_ravendb_to_postgres_migrate.py
-   python scripts/exams_ravendb_to_postgres_migrate.py
-   ```
-
----
-
-### B. .NET 10 Web API & xUnit Test Suite CLI
-1. Run xUnit tests directly on host:
-   ```bash
-   dotnet test student-fee-poc/dotnet/student-fee-poc-tests/student-fee-poc-tests.csproj
-   ```
-2. Run ASP.NET Core 10 Web API on host:
-   ```bash
-   dotnet run --project student-fee-poc/dotnet/student-fee-poc/student-fee-poc.csproj
-   ```
-
----
-
-## 5. Database Verification & SQL Inspection
-
-You can run these queries directly in pgAdmin Query Tool or `psql` to verify data integrity:
-
-### 1. Verify Migrated Record Counts
 ```sql
+-- 1. Verify record counts across all 9 tables:
 SELECT 'organization' AS entity, COUNT(*) FROM organization
 UNION ALL SELECT 'institute', COUNT(*) FROM institute
 UNION ALL SELECT 'student', COUNT(*) FROM student
@@ -216,17 +137,13 @@ UNION ALL SELECT 'persona', COUNT(*) FROM persona
 UNION ALL SELECT 'course', COUNT(*) FROM course
 UNION ALL SELECT 'staff', COUNT(*) FROM staff
 UNION ALL SELECT 'exam', COUNT(*) FROM exam;
-```
 
-### 2. Verify Cross-Module View (`student_fee_summary_view`)
-```sql
+-- 2. Verify cross-module view:
 SELECT student_code, student_name, course_name, fee_name, amount, paid_amount, status
 FROM student_fee_summary_view
 LIMIT 10;
-```
 
-### 3. Verify PostgreSQL Trigger Audit Trail
-```sql
+-- 3. Verify PostgreSQL trigger audit trail:
 SELECT tx_no, student_id, amount, status, action, logged_at
 FROM fee_transaction_audit
 ORDER BY logged_at DESC
@@ -235,14 +152,11 @@ LIMIT 5;
 
 ---
 
-## 6. Teardown & Clean Reset
-
-To stop running containers:
+## 7. Teardown
 ```bash
+# Stop running containers:
 docker compose down
-```
 
-To wipe the database volume and start completely fresh:
-```bash
+# Wipe local Docker database volume if needed:
 docker compose down -v
 ```

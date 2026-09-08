@@ -15,9 +15,16 @@ cd r2pg-migration
 
 ### Prerequisites
 - **kubectl** configured with access to the cluster
-- **Python 3.12**
+- **psql** (PostgreSQL CLI client)
+- **Python 3.12+**
 - **Docker Desktop** (Running with Linux containers)
 - **RavenDB Client Certificate** (`.pfx` file)
+
+### Install Dependencies
+Install all required Python dependencies for running migrations and parity audits:
+```bash
+pip install -r scripts/requirements.txt
+```
 
 ---
 
@@ -34,7 +41,7 @@ Update `.env` with these values for Kubernetes:
 |---|---|---|
 | `PG_HOST` | `localhost` | PostgreSQL host (via port-forward) |
 | `PG_PORT` | `6432` | PgBouncer port |
-| `PG_DB` | `ctlytics_test` | Database name (initial connection) |
+| `PG_DB` | `rpg` | Target PostgreSQL database name |
 | `PG_USER` | `postgres` | Username |
 | `PG_PASSWORD` | `<your-postgres-password>` | PostgreSQL password |
 | `RAVEN_URL` | `https://a.free.btl.ravendb.cloud` | RavenDB instance URL |
@@ -90,12 +97,6 @@ Expected output:
 (1 row)
 ```
 Confirmed — `rpg` database is created. Move to the next step.
-
-### Step 4: Update `.env` — Set Database to `rpg`
-Now update your `.env` file to point to the newly created `rpg` database:
-```dotenv
-PG_DB=rpg
-```
 
 ---
 

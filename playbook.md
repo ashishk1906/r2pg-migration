@@ -65,7 +65,15 @@ docker compose --profile local-db up -d rpg-postgres
    ```bash
    kubectl port-forward svc/pgbouncer-svc -n test 6432:6432
    ```
-   *(Ensure `.env` has `PG_PORT=6432` and `PG_PASSWORD=<your-postgres-password>`)*.
+3. **Create the `rpg` database via terminal** (if not already created):
+   ```bash
+   # Connects to existing ctlytics_test to create the new rpg database:
+   python -c "import psycopg2; conn = psycopg2.connect(host='localhost', port=6432, user='postgres', password='<your-postgres-password>', dbname='ctlytics_test'); conn.autocommit = True; cur = conn.cursor(); cur.execute('CREATE DATABASE rpg;'); print('Database rpg created successfully!'); cur.close(); conn.close()"
+   
+   # Or via psql (if installed):
+   # psql -h localhost -p 6432 -U postgres -d ctlytics_test -c "CREATE DATABASE rpg;"
+   ```
+   *(Ensure `.env` has `PG_PORT=6432`, `PG_DB=rpg`, and `PG_PASSWORD=<your-postgres-password>`)*.
 
 ---
 
@@ -157,6 +165,9 @@ LIMIT 5;
 # Stop running containers:
 docker compose down
 
-# Wipe local Docker database volume if needed:
+# Option A: Wipe local Docker database volume if needed:
 docker compose down -v
+
+# Option B: Drop/reset Kubernetes 'rpg' database if needed (run inside ctlytics_test):
+# DROP DATABASE rpg WITH (FORCE);
 ```

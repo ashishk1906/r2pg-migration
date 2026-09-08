@@ -1,7 +1,7 @@
 # Local Testing & Onboarding Playbook
 ## CT-RPG: RavenDB to PostgreSQL Migration & .NET 10 Web API
 
-A streamlined guide for developers to configure credentials, choose a database target (Local Docker or Kubernetes PgBouncer), run migrations, verify 100% data parity, and execute tests.
+A streamlined guide for developers to configure credentials, connect to the **Kubernetes SVC PostgreSQL cluster via PgBouncer port-forward**, create the target database, run migrations, verify 100% data parity, and execute tests.
 
 ---
 
@@ -14,9 +14,10 @@ cd r2pg-migration
 ```
 
 ### Prerequisites
+- **kubectl** configured with access to the cluster
+- **Python 3.12**
 - **Docker Desktop** (Running with Linux containers)
 - **RavenDB Client Certificate** (`.pfx` file)
-- *(Optional)* Python 3.12 & .NET 10 SDK (only needed if running directly on host without Docker)
 
 ---
 
@@ -27,16 +28,18 @@ cd r2pg-migration
 cp .env.example .env
 ```
 
-| Variable | Local Docker (Default) | Kubernetes (PgBouncer) | Description |
-|---|---|---|---|
-| `PG_HOST` | `localhost` | `localhost` | PostgreSQL host |
-| `PG_PORT` | `15432` | `6432` | PostgreSQL port |
-| `PG_DB` | `rpg` | `rpg` | Database name |
-| `PG_USER` | `postgres` | `postgres` | Username |
-| `PG_PASSWORD` | `postgres` | `<your-postgres-password>` | Target PostgreSQL password |
-| `RAVEN_URL` | `https://a.free.btl.ravendb.cloud` | `https://a.free.btl.ravendb.cloud` | RavenDB instance URL |
-| `RAVEN_DB` | `BTL` | `BTL` | Source RavenDB database name |
-| `RAVEN_CERT_FILE` | `certs/free.btl.client.certificate.pfx` | `certs/free.btl.client.certificate.pfx` | Client certificate path inside `scripts/certs/` |
+Update `.env` with these values for Kubernetes:
+
+| Variable | Value | Description |
+|---|---|---|
+| `PG_HOST` | `localhost` | PostgreSQL host (via port-forward) |
+| `PG_PORT` | `6432` | PgBouncer port |
+| `PG_DB` | `ctlytics_test` | Database name (initial connection) |
+| `PG_USER` | `postgres` | Username |
+| `PG_PASSWORD` | `<your-postgres-password>` | PostgreSQL password |
+| `RAVEN_URL` | `https://a.free.btl.ravendb.cloud` | RavenDB instance URL |
+| `RAVEN_DB` | `BTL` | Source RavenDB database name |
+| `RAVEN_CERT_FILE` | `certs/free.btl.client.certificate.pfx` | Client certificate path inside `scripts/certs/` |
 
 ### Step B: Place RavenDB Certificate
 Download the client certificate from **[Google Drive](https://drive.google.com/file/d/1tcdrDU3Q1zzWBqs-BS0_0PGGvXjR2INI/view?usp=drive_link)** and place it into:
@@ -47,48 +50,85 @@ scripts/certs/<your-client-certificate>.pfx
 
 ---
 
-## 3. Database Target (Choose Option A or B)
+## 3. Kubernetes PostgreSQL Setup (via PgBouncer)
 
-### Option A: Local Docker PostgreSQL (Zero-Config)
-Start the local PostgreSQL container on port `15432`:
+### Step 1: Enable Wildcard Database Routing on PgBouncer
+This is a **one-time setup** so PgBouncer accepts any database (including `rpg`):
 ```bash
-docker compose --profile local-db up -d rpg-postgres
+kubectl set env deployment/pgbouncer -n test PGBOUNCER_DATABASE="*"
+kubectl rollout status deployment/pgbouncer -n test
 ```
 
-### Option B: Remote Kubernetes PostgreSQL (via PgBouncer)
-1. **Enable wildcard routing** on PgBouncer (one-time setup so it accepts the `rpg` database):
-   ```bash
-   kubectl set env deployment/pgbouncer -n test PGBOUNCER_DATABASE="*"
-   kubectl rollout status deployment/pgbouncer -n test
-   ```
-2. **Start port-forwarding** in a separate terminal:
-   ```bash
-   kubectl port-forward svc/pgbouncer-svc -n test 6432:6432
-   ```
-3. **Create the `rpg` database via terminal** (if not already created):
-   ```bash
-   # Connects to existing ctlytics_test to create the new rpg database:
-   python -c "import psycopg2; conn = psycopg2.connect(host='localhost', port=6432, user='postgres', password='<your-postgres-password>', dbname='ctlytics_test'); conn.autocommit = True; cur = conn.cursor(); cur.execute('CREATE DATABASE rpg;'); print('Database rpg created successfully!'); cur.close(); conn.close()"
-   
-   # Or via psql (if installed):
-   # psql -h localhost -p 6432 -U postgres -d ctlytics_test -c "CREATE DATABASE rpg;"
-   ```
-   *(Ensure `.env` has `PG_PORT=6432`, `PG_DB=rpg`, and `PG_PASSWORD=<your-postgres-password>`)*.
+### Step 2: Start Port-Forwarding
+Run this in a **separate terminal** and keep it open:
+```bash
+kubectl port-forward -n test svc/pgbouncer-svc 6432:6432
+```
+
+> [!NOTE]
+> If you get this error:
+> ```
+> error: error upgrading connection: unable to upgrade connection: error dialing backend: No agent available
+> ```
+> Wait a few minutes and run the command again.
+
+### Step 3: Create the `rpg` Database
+Open a **new terminal** and run:
+```bash
+psql -h localhost -p 6432 -U postgres -d ctlytics_test -c "CREATE DATABASE rpg;"
+```
+
+Verify the `rpg` database was created successfully:
+```bash
+psql -h localhost -p 6432 -U postgres -d ctlytics_test -c "SELECT datname FROM pg_database WHERE datname = 'rpg';"
+```
+Expected output:
+```
+ datname
+---------
+ rpg
+(1 row)
+```
+Confirmed — `rpg` database is created. Move to the next step.
+
+### Step 4: Update `.env` — Set Database to `rpg`
+Now update your `.env` file to point to the newly created `rpg` database:
+```dotenv
+PG_DB=rpg
+```
 
 ---
 
 ## 4. Run Migration & Parity Verification
 
 ### Step 1: Run Data Migration
-Runs the Python ETL pipeline to create base tables, transform documents, and apply indexes, views, and triggers:
+Runs the Python ETL pipeline to create all tables, transform documents from RavenDB, and apply indexes, views, and triggers into the `rpg` database:
 ```bash
-# Run all 6 modules via Docker:
-docker compose run --rm rpg-migrator --all
-
-# (Or run directly on host: python scripts/migrate_all.py --all)
+# Run all 6 modules:
+python scripts/migrate_all.py --all
 ```
-> **Selective Migration**: To run only specific modules:  
+> **Selective Migration**: To run only specific modules:
 > `docker compose run --rm rpg-migrator --module student,fees`
+
+After migration completes, verify the tables were created in the `rpg` database:
+```bash
+psql -h localhost -p 6432 -U postgres -d rpg -c "\dt"
+```
+Expected output — you should see all 9 tables:
+```
+          List of relations
+ Schema |       Name        | Type  |  Owner
+--------+-------------------+-------+----------
+ public | course            | table | postgres
+ public | exam              | table | postgres
+ public | fee               | table | postgres
+ public | fee_transaction   | table | postgres
+ public | institute         | table | postgres
+ public | organization      | table | postgres
+ public | persona           | table | postgres
+ public | staff             | table | postgres
+ public | student           | table | postgres
+```
 
 ### Step 2: Verify 100% Data Parity
 Audit all 9 domains field-by-field against RavenDB:
@@ -126,7 +166,7 @@ docker compose run --rm rpg-tests
 1. In pgAdmin, right-click **Servers** ➔ **Register** ➔ **Server...**
 2. In **Connection** tab:
    - **Host name/address**: `localhost`
-   - **Port**: `15432` (Option A) or `6432` (Option B)
+   - **Port**: `6432`
    - **Maintenance database**: `rpg`
    - **Username**: `postgres`
    - **Password**: `<your-postgres-password>`
@@ -161,13 +201,27 @@ LIMIT 5;
 ---
 
 ## 7. Teardown
+
+### Step 1: Stop Running Containers
 ```bash
-# Stop running containers:
 docker compose down
-
-# Option A: Wipe local Docker database volume if needed:
-docker compose down -v
-
-# Option B: Drop/reset Kubernetes 'rpg' database if needed (run inside ctlytics_test):
-# DROP DATABASE rpg WITH (FORCE);
 ```
+
+### Step 2: Delete `rpg` Database (Optional / Reset)
+To delete the newly created `rpg` database from terminal, connect to `ctlytics_test` and force-drop it:
+```bash
+psql -h localhost -p 6432 -U postgres -d ctlytics_test -c "DROP DATABASE rpg WITH (FORCE);"
+```
+
+Verify the database has been deleted:
+```bash
+psql -h localhost -p 6432 -U postgres -d ctlytics_test -c "SELECT datname FROM pg_database WHERE datname = 'rpg';"
+```
+Expected output:
+```
+ datname 
+---------
+(0 rows)
+```
+*(Confirmed — `rpg` database is deleted).*
+

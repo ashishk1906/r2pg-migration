@@ -59,6 +59,8 @@ scripts/certs/<your-client-certificate>.pfx
 
 ## 3. Kubernetes PostgreSQL Setup (via PgBouncer)
 
+Open a **new terminal** to set up Kubernetes and maintain the port-forward connection:
+
 ### Step 1: Enable Wildcard Database Routing on PgBouncer
 This is a **one-time setup** so PgBouncer accepts any database (including `rpg`):
 ```bash
@@ -67,7 +69,7 @@ kubectl rollout status deployment/pgbouncer -n test
 ```
 
 ### Step 2: Start Port-Forwarding
-Run this in a **separate terminal** and keep it open:
+Start the port-forward in this terminal and **keep it running**:
 ```bash
 kubectl port-forward -n test svc/pgbouncer-svc 6432:6432
 ```
@@ -80,7 +82,7 @@ kubectl port-forward -n test svc/pgbouncer-svc 6432:6432
 > Wait a few minutes and run the command again.
 
 ### Step 3: Create the `rpg` Database
-Open a **new terminal** and run:
+Since the port-forward is active in the previous terminal, open a **new terminal** and run:
 ```bash
 psql -h localhost -p 6432 -U postgres -d ctlytics_test -c "CREATE DATABASE rpg;"
 ```
@@ -103,6 +105,8 @@ Confirmed — `rpg` database is created. Move to the next step.
 ## 4. Run Migration & Parity Verification
 
 ### Step 1: Run Data Migration
+Go back to your **old/original terminal** where this repository is open (`r2pg-migration`).
+
 Runs the Python ETL pipeline to create all tables, transform documents from RavenDB, and apply indexes, views, and triggers into the `rpg` database:
 ```bash
 # Run all 6 modules:

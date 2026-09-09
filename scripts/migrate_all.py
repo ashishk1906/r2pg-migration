@@ -50,18 +50,21 @@ def apply_post_migration_sql(scripts_dir: Path):
     print("\n" + "=" * 65)
     print("[*] Applying Post-Migration Views, Indexes & Triggers")
     print("=" * 65)
-    
-    # Try finding sql directory
+
+    # Locate sql directory — fail hard if not found
     sql_dirs = [
         scripts_dir.parent / "student-fee-poc" / "sql",
         scripts_dir.parent / "sql",
         scripts_dir / "sql"
     ]
     sql_dir = next((d for d in sql_dirs if d.exists()), None)
-    
+
     if not sql_dir:
-        print("[!] Warning: sql directory not found for post-migration views. Skipping.")
-        return
+        print("[!] ERROR: sql directory not found. Searched:")
+        for d in sql_dirs:
+            print(f"    {d}")
+        print("[!] Post-migration SQL is required. Cannot continue.")
+        sys.exit(1)
 
     pg_host = os.getenv("PG_HOST")
     pg_port = int(os.getenv("PG_PORT", "5432")) if os.getenv("PG_PORT") else 5432
@@ -70,7 +73,7 @@ def apply_post_migration_sql(scripts_dir: Path):
     pg_password = os.getenv("PG_PASSWORD")
 
     sql_files = ["01_student_fee_view.sql", "02_trigger.sql"]
-    
+
     try:
         conn = psycopg2.connect(
             host=pg_host,
@@ -83,16 +86,18 @@ def apply_post_migration_sql(scripts_dir: Path):
         with conn.cursor() as cur:
             for sql_file in sql_files:
                 file_path = sql_dir / sql_file
-                if file_path.exists():
-                    print(f"Applying SQL: {sql_file}...")
-                    sql_content = file_path.read_text(encoding="utf-8")
-                    cur.execute(sql_content)
-                    print(f"[+] Applied {sql_file} successfully.")
-                else:
-                    print(f"[!] SQL file {sql_file} not found in {sql_dir}.")
+                if not file_path.exists():
+                    print(f"[!] ERROR: Required SQL file not found: {file_path}")
+                    conn.close()
+                    sys.exit(1)
+                print(f"Applying SQL: {sql_file}...")
+                sql_content = file_path.read_text(encoding="utf-8")
+                cur.execute(sql_content)
+                print(f"[+] Applied {sql_file} successfully.")
         conn.close()
     except Exception as ex:
-        print(f"[!] Warning during post-migration SQL execution: {ex}")
+        print(f"[!] ERROR during post-migration SQL execution: {ex}")
+        sys.exit(1)
 
 def main():
     scripts_dir = Path(__file__).parent.resolve()

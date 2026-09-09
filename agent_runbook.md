@@ -258,15 +258,19 @@ Throughout this playbook, all `psql` invocations use `$PG_HOST`, `$PG_PORT`, and
 
 ## 3. Install RavenDB Certificate
 
-Obtain the RavenDB client certificate through the approved internal credential-distribution mechanism.
+> [!NOTE]
+> `RAVEN_CERT_FILE` is resolved **relative to the repo root** — the directory from which you run migration commands. The default value `certs/free.btl.client.certificate.pfx` means the file must be placed at `<repo-root>/certs/free.btl.client.certificate.pfx`. Do not place it inside `scripts/`.
 
-Place it at:
+Download the client certificate from **[Google Drive](https://drive.google.com/file/d/1tcdrDU3Q1zzWBqs-BS0_0PGGvXjR2INI/view?usp=drive_link)** and place it at:
 
 ```text
 certs/free.btl.client.certificate.pfx
 ```
 
-Do not continue if the certificate is unavailable. Missing certificates are a blocking precondition.
+*(All `.pfx` files in `certs/` are automatically ignored by Git.)*
+
+> [!IMPORTANT]
+> **Agent Precondition:** For automated agent execution, the certificate file must already exist at `certs/free.btl.client.certificate.pfx` before running the playbook. Do not continue if the certificate is unavailable; missing certificates are a blocking precondition.
 
 ---
 

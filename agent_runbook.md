@@ -9,6 +9,7 @@ execution:
     - human
     - coding-agent
   working_directory: "repository-root"
+  shell: "bash" # Requires POSIX Bash (Git Bash, WSL, or Linux/macOS)
   interactive_input_allowed: false
   stop_on_error: true
   destructive_actions_allowed: false
@@ -91,7 +92,8 @@ prerequisites:
     sample_path: "/api/stu/student?limit=2"
 
 commands:
-  preflight: "./scripts/verify-prerequisites.sh"
+  wrapper: "bash scripts/local-onboard.sh"
+  preflight: "bash scripts/verify-prerequisites.sh"
   wait_port_forward: "bash scripts/wait-for-port-forward.sh /tmp/ct-rpg-pgbouncer-port-forward.log 6432 30"
   migrate: "python3 scripts/migrate_all.py --all"
   post_sql_check_view: "psql -h $PG_HOST -p $PG_PORT -U $PG_USER -d rpg -c \"SELECT 1 FROM student_fee_summary_view LIMIT 1;\""
@@ -106,6 +108,7 @@ safety:
   never_commit:
     - ".env"
     - "*.pfx"
+    - "certs/*"
     - "scripts/certs/*"
 
   shared_environment_mutation:
@@ -185,6 +188,20 @@ It is intended to be executable by either a developer or an automated coding age
 The YAML front matter above is the operational contract. The Markdown below specifies the exact execution steps.
 
 ---
+
+## ⚡ Fast-Track: Single-Command Automated Verification
+
+For automated coding agents (e.g. Codex) or quick local runs, execute the dedicated orchestrator script:
+
+```bash
+bash scripts/local-onboard.sh
+```
+
+This single command automatically validates prerequisites, manages background port-forwards, executes the idempotent migration, verifies parity, starts the API, runs automated tests, cleans up processes, and reports the final status table.
+
+If any gate fails, `local-onboard.sh` stops immediately, reports the error, and performs teardown.
+
+For granular step-by-step execution or manual debugging, follow the individual sections below.
 
 ## 1. Clone Repository
 
@@ -334,27 +351,37 @@ Success requires exit code `0`.
 
 ### Check port availability
 
-Check if local port `6432` is already in use:
+Check if local port `6432` is already listening (cross-platform):
 
 ```bash
-if ss -ltn | grep -q ':6432'; then
+PORT_BUSY=$(python3 -c "import socket; s=socket.socket(); res=s.connect_ex(('127.0.0.1', 6432)); s.close(); print('BUSY' if res==0 else 'FREE')")
+if [ "$PORT_BUSY" = "BUSY" ]; then
   echo "Port 6432 is already occupied" >&2
   exit 1
 fi
 ```
 
-### Clean up stale PID
+### Temporary directory & PID handling
+
+Resolve a writable temporary directory across Linux, macOS, and Windows Git Bash/WSL:
+
+```bash
+TMP_DIR="${TMPDIR:-${TEMP:-/tmp}}"
+mkdir -p "$TMP_DIR"
+PF_PID_FILE="$TMP_DIR/ct-rpg-pgbouncer-port-forward.pid"
+PF_LOG_FILE="$TMP_DIR/ct-rpg-pgbouncer-port-forward.log"
+```
 
 If a port-forward PID file exists from a previous session, verify if the process is still running:
 
 ```bash
-if [ -f /tmp/ct-rpg-pgbouncer-port-forward.pid ]; then
-  PID=$(cat /tmp/ct-rpg-pgbouncer-port-forward.pid)
-  if kill -0 "$PID" 2>/dev/null; then
+if [ -f "$PF_PID_FILE" ]; then
+  PID=$(cat "$PF_PID_FILE" 2>/dev/null || true)
+  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
     echo "Port-forward process $PID is already running" >&2
     exit 1
   else
-    rm -f /tmp/ct-rpg-pgbouncer-port-forward.pid
+    rm -f "$PF_PID_FILE"
   fi
 fi
 ```
@@ -365,9 +392,9 @@ Start the forward in the background:
 
 ```bash
 kubectl port-forward -n test svc/pgbouncer-svc 6432:6432 \
-  > /tmp/ct-rpg-pgbouncer-port-forward.log 2>&1 &
+  > "$PF_LOG_FILE" 2>&1 &
 
-echo $! > /tmp/ct-rpg-pgbouncer-port-forward.pid
+echo $! > "$PF_PID_FILE"
 ```
 
 ### Wait for readiness
@@ -375,7 +402,7 @@ echo $! > /tmp/ct-rpg-pgbouncer-port-forward.pid
 Wait for the port-forward using the bounded readiness script:
 
 ```bash
-bash scripts/wait-for-port-forward.sh /tmp/ct-rpg-pgbouncer-port-forward.log 6432 30
+bash scripts/wait-for-port-forward.sh "$PF_LOG_FILE" 6432 30
 ```
 
 The script polls the log file for `"Forwarding from"` and halts immediately if `"error:"` is detected.
@@ -548,12 +575,29 @@ python3 scripts/verify_raven_to_postgres.py
 
 The verifier writes a JSON report to `validation/exhaustive-parity-report-<timestamp>.json`.
 
-Inspect the latest report file:
+Inspect and programmatically validate the latest report file:
 
 ```bash
-LATEST_REPORT=$(ls -t validation/exhaustive-parity-report-*.json | head -1)
-echo "Latest report: $LATEST_REPORT"
-grep '"overall_status"' "$LATEST_REPORT"
+python3 -c "
+import json, glob, os, sys
+reports = glob.glob('validation/exhaustive-parity-report-*.json')
+if not reports:
+    print('ERROR: No parity report found in validation/', file=sys.stderr)
+    sys.exit(1)
+latest = max(reports, key=os.path.getctime)
+with open(latest, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+status = data.get('overall_status')
+results = data.get('results', [])
+missing = sum(r.get('missing_in_pg_count', 0) for r in results)
+extra = sum(r.get('extra_in_pg_count', 0) for r in results)
+mismatches = sum(r.get('field_mismatches_count', 0) for r in results)
+print(f'Latest Report: {latest}')
+print(f'Status: {status} | Missing: {missing} | Extra: {extra} | Mismatches: {mismatches}')
+if status != 'PASS' or missing != 0 or extra != 0 or mismatches != 0:
+    print('Parity gate check failed!', file=sys.stderr)
+    sys.exit(1)
+"
 ```
 
 ### Parity gate

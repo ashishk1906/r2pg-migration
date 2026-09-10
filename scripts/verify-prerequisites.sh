@@ -133,7 +133,7 @@ fi
 echo ""
 echo "=== Secrets Not Committed ==="
 
-COMMITTED_SECRETS=$(git -C "$REPO_ROOT" ls-files -- '.env' '*.pfx' 'scripts/certs/*' 2>/dev/null || true)
+COMMITTED_SECRETS=$(git -C "$REPO_ROOT" ls-files -- '.env' '*.pfx' 'certs/*' 'scripts/certs/*' ':!:scripts/certs/.gitkeep' ':!:scripts/certs/README.md' ':!:certs/.gitkeep' 2>/dev/null || true)
 if [ -z "$COMMITTED_SECRETS" ]; then
   pass "No secrets found in git index"
 else

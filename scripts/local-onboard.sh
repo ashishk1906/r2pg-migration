@@ -48,6 +48,12 @@ echo "CT-RPG Local Verification — Starting Run"
 echo "========================================="
 echo ""
 
+# Activate virtual environment if present (supporting both Linux and Windows venv layouts)
+if [ -d ".venv" ]; then
+  # shellcheck disable=SC1091
+  source .venv/bin/activate 2>/dev/null || source .venv/Scripts/activate 2>/dev/null || true
+fi
+
 # -----------------------------------------------------------------------------
 # Gate 1: Prerequisites Check
 # -----------------------------------------------------------------------------
@@ -60,10 +66,6 @@ echo ""
 # Non-Interactive Environment Setup
 # -----------------------------------------------------------------------------
 echo "[2/8] Setting up environment & non-interactive session..."
-if [ -d ".venv" ]; then
-  # shellcheck disable=SC1091
-  source .venv/bin/activate 2>/dev/null || true
-fi
 
 # Load .env non-interactively
 set -a

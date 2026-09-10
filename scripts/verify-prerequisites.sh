@@ -16,6 +16,12 @@ pass() { echo "[OK]   $1"; }
 echo "=== Prerequisites Check ==="
 echo ""
 
+# Auto-activate venv if present
+if [ -d "$REPO_ROOT/.venv" ]; then
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/.venv/bin/activate" 2>/dev/null || source "$REPO_ROOT/.venv/Scripts/activate" 2>/dev/null || true
+fi
+
 # --- Tool versions ---
 if command -v kubectl &>/dev/null; then
   pass "kubectl: $(kubectl version --client --short 2>/dev/null | head -1)"
@@ -29,14 +35,21 @@ else
   fail "psql not found"
 fi
 
-if command -v python3 &>/dev/null; then
-  PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PY_CMD=""
+if command -v python3 &>/dev/null && python3 -c 'import sys' &>/dev/null 2>&1; then
+  PY_CMD="python3"
+elif command -v python &>/dev/null && python -c 'import sys' &>/dev/null 2>&1; then
+  PY_CMD="python"
+fi
+
+if [ -n "$PY_CMD" ]; then
+  PY_VER=$($PY_CMD -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
   PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
   PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
   if [ "$PY_MAJOR" -gt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -ge 12 ]; }; then
-    pass "python3: $PY_VER (>= 3.12)"
+    pass "python3 ($PY_CMD): $PY_VER (>= 3.12)"
   else
-    fail "python3 $PY_VER < 3.12 required"
+    fail "python3 ($PY_CMD) $PY_VER < 3.12 required"
   fi
 else
   fail "python3 not found"

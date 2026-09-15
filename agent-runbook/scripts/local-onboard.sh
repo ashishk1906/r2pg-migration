@@ -36,7 +36,18 @@ if command -v kubectl >/dev/null 2>&1; then
   kubectl config use-context "$EXPECTED_K8S_CONTEXT" >/dev/null 2>&1 || true
 fi
 
-python_cmd="python3"
+python_cmd=""
+for candidate in python.exe python python3; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    python_cmd="$candidate"
+    break
+  fi
+done
+
+if [ -z "$python_cmd" ]; then
+  echo "[FAIL] A working Python interpreter is required" >&2
+  exit 1
+fi
 
 work_tmp="${TMPDIR:-${TEMP:-/tmp}}"
 pid_file="$work_tmp/ct-rpg-agent-port-forwards.pid"
@@ -60,7 +71,9 @@ bash agent-runbook/scripts/verify-prerequisites.sh
 
 if ! "$python_cmd" -c 'import psycopg2' >/dev/null 2>&1; then
   echo "[-] Installing migration dependencies..."
-  if command -v pip3 >/dev/null 2>&1; then
+  if [ "$python_cmd" = "python.exe" ] && command -v pip.exe >/dev/null 2>&1; then
+    pip.exe install -r scripts/requirements.txt
+  elif command -v pip3 >/dev/null 2>&1; then
     pip3 install -r scripts/requirements.txt
   elif command -v pip >/dev/null 2>&1; then
     pip install -r scripts/requirements.txt

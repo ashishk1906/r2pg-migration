@@ -2,6 +2,26 @@
 
 Use this guide to install Antigravity and run `agent_runbook.md`.
 
+## Prerequisites
+
+Before starting the agent, the machine must have:
+
+- Bash: Git Bash, WSL, or another Bash-compatible shell
+- Git
+- `kubectl`
+- PostgreSQL `psql` client
+- Python 3.12+
+- Docker Desktop with Linux containers
+- Docker Compose v2
+- `curl`
+- Access to the expected Kubernetes context:
+  `do-blr1-k8s-1-22-8-do-1-blr1-1655977229480`
+- Access to the Kubernetes `test` namespace and services `pgbouncer-svc` and `postgresql`
+- A local `.env` containing the real credentials
+- RavenDB certificate at `certs/free.btl.client.certificate.pfx`
+
+The agent verifies these prerequisites, but it cannot invent missing credentials, certificate files, Docker, or Kubernetes access. If a required item is unavailable, execution must stop before migration.
+
 ## 1. Install Antigravity
 
 ### Windows PowerShell
@@ -132,7 +152,7 @@ If Antigravity asks you to sign in, complete the browser sign-in flow. If it is 
 Paste this exact prompt into Antigravity:
 
 ```text
-Execute agent_runbook.md end-to-end from the repository root. Run every gate in order, stop on any failure, never print secrets, and report the final PASS/FAIL table with the failed command and non-secret error output if applicable.
+From the repository root, execute `bash agent-runbook/scripts/local-onboard.sh` exactly once as the implementation of `agent_runbook.md`. Run every gate in order, stop on any failure, never print secrets, and report the final PASS/FAIL table with the failed command and non-secret error output if applicable.
 ```
 
 The agent should follow `agent_runbook.md`, including the prerequisite check, PostgreSQL setup, migration, parity verification, API health check, and automated tests.

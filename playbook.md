@@ -35,6 +35,16 @@ Onboarding is complete when **all four gates pass in order**:
 
 Do not advance to the next gate until the current one passes.
 
+### Canonical Agent Execution
+
+For unattended execution, use the deterministic wrapper. It performs prerequisite checks, manages both port-forwards, installs migration dependencies when needed, runs migration/parity/API/tests, and cleans up its own processes:
+
+```bash
+bash agent-runbook/scripts/local-onboard.sh
+```
+
+Do not run the manual steps and the wrapper in the same session. On any failed gate, stop and report the command, exit code, and relevant non-secret output.
+
 ---
 
 ## 1. Terminal A: Clone & Prerequisites

@@ -1,15 +1,14 @@
 ---
-title: "Local Testing & Onboarding Playbook"
+title: "CT-RPG Agent Runbook"
 project: "CT-RPG"
-purpose: "RavenDB to PostgreSQL migration and .NET 10 Web API verification"
-version: "1.2"
+purpose: "Deterministic RavenDB to PostgreSQL migration and .NET 10 Web API verification"
+version: "1.0"
 
 execution:
   intended_for:
-    - human
     - coding-agent
   working_directory: "repository-root"
-  shell: "bash" # Requires POSIX Bash (Git Bash, WSL, or Linux/macOS)
+  shell: "bash"
   interactive_input_allowed: false
   stop_on_error: true
   destructive_actions_allowed: false
@@ -24,7 +23,7 @@ prerequisites:
       required: true
     - name: "kubectl"
       required: true
-      requirement: "Configured with access to the CT test Kubernetes cluster"
+      requirement: "Configured with access to the expected CT test cluster"
     - name: "psql"
       required: true
       description: "PostgreSQL CLI client"
@@ -36,32 +35,27 @@ prerequisites:
       requirement: "Docker daemon running with Linux containers"
     - name: "docker-compose"
       required: true
-      requirement: "Docker Compose v2 via `docker compose`"
+      requirement: "Docker Compose v2 via docker compose"
 
   kubernetes:
     required: true
     expected_context: "do-blr1-k8s-1-22-8-do-1-blr1-1655977229480"
     namespace: "test"
-    service: "pgbouncer-svc"
-    local_port: 6432
-    remote_port: 6432
+    services:
+      - "pgbouncer-svc"
+      - "postgresql"
     context_must_be_verified: true
-
-  pgbouncer:
-    wildcard_routing_required: true
-    note: "PGBOUNCER_DATABASE='*' routing is a cluster bootstrap precondition managed by operators. Agents must never run kubectl set env to mutate PgBouncer."
 
   postgres:
     maintenance_database: "postgres"
-    admin_host_variable: "PG_ADMIN_HOST"
-    admin_port_variable: "PG_ADMIN_PORT"
-    maintenance_database_variable: "PG_MAINTENANCE_DB"
     target_database: "rpg"
+    admin_port: 5432
+    pgbouncer_port: 6432
     required_role: "postgres"
     required_privileges:
-      - "CONNECT to maintenance database"
+      - "CONNECT to postgres"
       - "CREATE DATABASE for initial setup"
-      - "Schema/data privileges required by migration scripts"
+      - "Schema and data privileges required by migration scripts"
 
   ravendb:
     required: true
@@ -70,7 +64,6 @@ prerequisites:
   files:
     - path: ".env"
       required: true
-      source: ".env.example"
       secret: true
     - path: "certs/free.btl.client.certificate.pfx"
       required: true
@@ -92,22 +85,12 @@ prerequisites:
       - "RAVEN_DB"
       - "RAVEN_CERT_FILE"
 
-  api:
-    base_url: "http://localhost:5000"
-    health_path: "/health"
-    sample_path: "/api/stu/student?limit=2"
-
 commands:
-  wrapper: "bash scripts/local-onboard.sh"
-  preflight: "bash scripts/verify-prerequisites.sh"
-  wait_port_forward: "bash scripts/wait-for-port-forward.sh /tmp/ct-rpg-pgbouncer-port-forward.log 6432 30"
-  migrate: "python3 scripts/migrate_all.py --all"
-  post_sql_check_view: "psql -h $PG_HOST -p $PG_PORT -U $PG_USER -d $PG_DB -c \"SELECT 1 FROM student_fee_summary_view LIMIT 1;\""
-  post_sql_check_trigger: "psql -h $PG_HOST -p $PG_PORT -U $PG_USER -d $PG_DB -tAc \"SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_student_modified_on';\""
-  verify_parity: "python3 scripts/verify_raven_to_postgres.py"
+  wrapper: "bash agent-runbook/scripts/local-onboard.sh"
+  preflight: "bash agent-runbook/scripts/verify-prerequisites.sh"
+  migrate: "python scripts/migrate_all.py --all"
+  verify_parity: "python scripts/verify_raven_to_postgres.py"
   start_api: "docker compose up -d --build rpg-api"
-  wait_api: "bash scripts/wait-for-api.sh http://localhost:5000 60"
-  sample_api: "curl --fail --silent --show-error http://localhost:5000/api/stu/student?limit=2"
   run_tests: "docker compose run --rm rpg-tests"
 
 safety:
@@ -116,10 +99,11 @@ safety:
     - "*.pfx"
     - "certs/*"
     - "scripts/certs/*"
+    - ".ct-rpg-pgpass"
 
   shared_environment_mutation:
     allowed: false
-    note: "Do not modify Kubernetes Deployments, Services, ConfigMaps, Secrets, PgBouncer configuration, or other shared resources."
+    note: "Do not modify Kubernetes Deployments, Services, ConfigMaps, Secrets, or PgBouncer configuration."
 
   database_reset:
     allowed_by_default: false
@@ -130,98 +114,84 @@ safety:
     requires_explicit_instruction: true
 
 agent_execution_rules:
-  - "Run from the repository root unless a step explicitly says otherwise."
-  - "Run the prerequisite gate before migration or API commands."
-  - "Verify the active Kubernetes context before accessing the cluster."
+  - "Run from the repository root."
+  - "Run only the canonical wrapper; do not duplicate its manual steps."
   - "Do not modify shared Kubernetes resources."
   - "Do not request interactive input."
-  - "Do not print secrets or certificate contents."
-  - "Treat missing credentials, configuration, or certificates as blocking preconditions."
-  - "If target database $PG_DB already exists, proceed and log; do not drop or recreate unless explicitly instructed."
-  - "Stop immediately when a required gate fails."
-  - "Do not bypass a failed migration, post-SQL, parity, health, or test gate."
-  - "On failure, report the step, command, exit code, and relevant stdout/stderr."
-  - "Do not perform optional teardown unless explicitly requested."
+  - "Do not print passwords, .env contents, RavenDB credentials, or certificate contents."
+  - "Verify the configured Kubernetes context before using Kubernetes."
+  - "Treat missing credentials, tools, certificates, or cluster resources as blocking preconditions."
+  - "Reuse an existing rpg database; do not drop, reset, or recreate it unless explicitly instructed."
+  - "Stop immediately on any failed command or verification gate."
+  - "Do not bypass migration, post-SQL, parity, API, or test failures."
+  - "Report the failed step, exact command, exit code, and relevant non-secret stderr/stdout."
+  - "Clean up only processes and containers started by the wrapper."
+
+pgbouncer:
+  wildcard_routing_required: true
+  operator_action_only: true
+  failure_message: "PgBouncer wildcard routing is not enabled; requires operator action."
 
 gates:
   preflight:
     success:
       - "exit_code == 0"
+      - "required tools found"
+      - "expected Kubernetes context active"
+      - "namespace test and services pgbouncer-svc/postgresql exist"
+      - ".env and certificate exist"
+      - "required variables are non-empty"
+
+  postgres:
+    success:
+      - "direct connection to postgres succeeds"
+      - "target rpg exists or is created"
+      - "connection to rpg through PgBouncer succeeds"
 
   migration:
     success:
       - "exit_code == 0"
-      - "post_sql_applied: student_fee_summary_view exists and returns rows"
-      - "post_sql_applied: trg_student_modified_on trigger exists in pg_trigger"
+
+  post_sql:
+    success:
+      - "student_fee_summary_view is queryable"
+      - "trg_student_modified_on exists"
 
   parity:
     success:
       - "exit_code == 0"
-      - "report_file: newest validation/exhaustive-parity-report-*.json has overall_status == 'PASS'"
-      - "missing_in_pg_count == 0"
-      - "extra_in_pg_count == 0"
-      - "field_mismatches_count == 0"
+      - "newest validation/exhaustive-parity-report-*.json has overall_status PASS"
+      - "sum of missing_in_pg_count == 0"
+      - "sum of extra_in_pg_count == 0"
+      - "sum of field_mismatches_count == 0"
 
   api_health:
     success:
-      - "http_status == 200"
-      - "exit_code == 0"
+      - "health endpoint returns HTTP 200"
+      - "sample API request succeeds"
 
   tests:
     success:
-      - "exit_code == 0"
+      - "docker compose run --rm rpg-tests exits 0"
 
 success_criteria:
-  - "Prerequisite gate passes."
-  - "Expected Kubernetes context is verified."
-  - "PgBouncer connectivity succeeds."
-  - "Target PostgreSQL database is available."
-  - "Migration completes successfully with exit code 0."
-  - "Post-migration views and triggers are verified in the database."
-  - "RavenDB-to-PostgreSQL parity verification reports zero mismatches with exit code 0."
-  - "Web API health endpoint returns HTTP 200."
-  - "Automated tests complete with exit code 0."
+  - "Every gate passes in order."
+  - "No interactive input or secret output occurs."
+  - "No shared Kubernetes resource is modified."
+  - "Port-forwards are cleaned up."
+  - "The final report has Overall: PASS."
 ---
 
-# Local Testing & Onboarding Playbook
+# CT-RPG Agent Runbook
 
-## CT-RPG: RavenDB → PostgreSQL Migration & .NET 10 Web API
+This is the deterministic agent contract for the human workflow in `playbook.md`. The implementation is in `agent-runbook/scripts`; the agent must not manually reinterpret the human steps.
 
-This playbook defines the local setup and verification workflow for migrating CT-RPG data from RavenDB to PostgreSQL and validating the .NET 10 Web API.
+## Required Precondition
 
-It is intended to be executable by either a developer or an automated coding agent (e.g., Codex).
-
-The YAML front matter above is the operational contract. The Markdown below specifies the exact execution steps.
-
----
-
-## ⚡ Fast-Track: Single-Command Automated Verification
-
-For automated coding agents (e.g. Codex) or quick local runs, execute the dedicated orchestrator script:
-
-```bash
-bash scripts/local-onboard.sh
-```
-
-This single command automatically validates prerequisites, manages background port-forwards, executes the idempotent migration, verifies parity, starts the API, runs automated tests, cleans up processes, and reports the final status table.
-
-If any gate fails, `local-onboard.sh` stops immediately, reports the error, and performs teardown.
-
-For granular step-by-step execution or manual debugging, follow the individual sections below.
-
-## 1. Configure Local Environment
-
-Create the local environment file if it does not already exist:
-
-```bash
-cp .env.example .env
-```
-
-Configure the following variables in `.env`:
+The repository must contain `.env` with the real credentials and:
 
 ```dotenv
 EXPECTED_K8S_CONTEXT=do-blr1-k8s-1-22-8-do-1-blr1-1655977229480
-
 PG_HOST=localhost
 PG_PORT=6432
 PG_ADMIN_HOST=localhost
@@ -229,444 +199,50 @@ PG_ADMIN_PORT=5432
 PG_MAINTENANCE_DB=postgres
 PG_DB=rpg
 PG_USER=postgres
-PG_PASSWORD=<postgres-password>
-
+PG_PASSWORD=<configured-secret>
 API_PORT=5000
-
 RAVEN_URL=https://a.free.btl.ravendb.cloud
 RAVEN_DB=BTL
 RAVEN_CERT_FILE=certs/free.btl.client.certificate.pfx
 ```
 
-`RAVEN_CERT_FILE` is relative to the repository root. `certs/free.btl.client.certificate.pfx` matches `.env.example` and resolves cleanly in both host and Docker container paths.
+The RavenDB certificate must already exist at `certs/free.btl.client.certificate.pfx`. The agent must not download credentials, request passwords, or print secret values.
 
-### Secret handling
+## Canonical Command
 
-The following must never be committed to Git:
+From the repository root, execute exactly once:
+
+```bash
+bash agent-runbook/scripts/local-onboard.sh
+```
+
+Do not execute the manual commands from `playbook.md` in addition to the wrapper. The wrapper owns environment bootstrap, dependency installation, context selection, prerequisite checks, port-forward processes, readiness waits, database setup, migration, SQL verification, parity, API checks, tests, cleanup, and final reporting.
+
+## Execution Order
+
+The wrapper executes these steps in order:
+
+1. Load `.env` and prepare the local Bash/Python/PostgreSQL environment.
+2. Verify required tools, Python 3.12+, Docker Compose, certificate, `.env`, Kubernetes context, namespace, and services.
+3. Start and wait for the PgBouncer forward from local port `6432` to service port `6432`.
+4. Start and wait for the direct PostgreSQL forward from local port `5432` to service port `5432`.
+5. Connect directly to the maintenance database `postgres` without interactive password input.
+6. Reuse `rpg` if it exists; otherwise create it idempotently.
+7. Verify that PgBouncer routes connections to `rpg`; stop if wildcard routing is unavailable.
+8. Run `python scripts/migrate_all.py --all`.
+9. Verify `student_fee_summary_view` and `trg_student_modified_on`.
+10. Run parity and require a PASS report with zero missing, extra, and field-mismatched records.
+11. Start the API, wait for HTTP 200 from `/health`, and verify the sample endpoint.
+12. Run `docker compose run --rm rpg-tests` and require exit code 0.
+13. Stop only wrapper-managed port-forwards and print the final report.
+
+## Failure Policy
+
+On the first failed command or gate, stop. Report the step, exact command, exit code, and relevant non-secret output. Do not continue to later gates, modify shared Kubernetes resources, or perform destructive database operations.
+
+## Expected Success Output
 
 ```text
-.env
-*.pfx
-scripts/certs/*
-```
-
-Secrets must be supplied through `.env`, the environment, or an approved credential distribution mechanism. Never print secret values during verification.
-
----
-
-## 1.1 Set Up Non-Interactive Environment
-
-To comply with non-interactive execution (`interactive_input_allowed: false`), create a Python virtual environment and export `.env` variables (including `PGPASSWORD`) once into your shell:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-set -a
-source .env
-set +a
-export PGPASSWORD="$PG_PASSWORD"
-```
-
-Administrative `psql` invocations use `$PG_ADMIN_HOST`, `$PG_ADMIN_PORT`, and `$PG_MAINTENANCE_DB`; application and migration invocations use `$PG_HOST`, `$PG_PORT`, and `$PG_DB`. All use `$PG_USER` and non-interactive authentication.
-
----
-
-## 2. Install RavenDB Certificate
-
-> [!NOTE]
-> `RAVEN_CERT_FILE` is resolved **relative to the repo root** — the directory from which you run migration commands. The default value `certs/free.btl.client.certificate.pfx` means the file must be placed at `<repo-root>/certs/free.btl.client.certificate.pfx`. Do not place it inside `scripts/`.
-
-Download the client certificate from **[Google Drive](https://drive.google.com/file/d/1tcdrDU3Q1zzWBqs-BS0_0PGGvXjR2INI/view?usp=drive_link)** and place it at:
-
-```text
-certs/free.btl.client.certificate.pfx
-```
-
-*(All `.pfx` files in `certs/` are automatically ignored by Git.)*
-
-> [!IMPORTANT]
-> **Agent Precondition:** For automated agent execution, the certificate file must already exist at `certs/free.btl.client.certificate.pfx` before running the playbook. Do not continue if the certificate is unavailable; missing certificates are a blocking precondition.
-
----
-
-## 3. Run Prerequisite Gate
-
-Execute the machine-checkable verification script:
-
-```bash
-./scripts/verify-prerequisites.sh
-```
-
-The script verifies:
-- Required tools (`git`, `kubectl`, `psql`, `python3`, `docker`, `docker compose v2`) are installed and functional.
-- Python is version 3.12 or newer.
-- Docker daemon is running with Linux container support.
-- Docker Compose v2 is available via `docker compose`.
-- The active Kubernetes context matches `$EXPECTED_K8S_CONTEXT`.
-- Namespace `test` and service `pgbouncer-svc` exist.
-- `.env` exists and contains all required variables (including `API_PORT` and `EXPECTED_K8S_CONTEXT`).
-- The RavenDB client certificate file exists at `$RAVEN_CERT_FILE`.
-- `git ls-files` confirms no `.env`, `*.pfx`, or `scripts/certs/*` files are tracked in the Git index.
-- No secret values are echoed to stdout or stderr.
-
-### Gate
-
-Success requires:
-
-```text
-exit code == 0
-```
-
-If the script exits non-zero, stop immediately and report the failures.
-
----
-
-## 4. Install Migration Dependencies
-
-Run within the active virtual environment:
-
-```bash
-python3 -m pip install -r scripts/requirements.txt
-```
-
-Success requires exit code `0`.
-
----
-
-## 5. Start PgBouncer Port Forward
-
-Start the forward in a separate terminal. `PG_PORT` is the local port; the PgBouncer service remains on remote port `6432`:
-
-```bash
-kubectl port-forward -n test svc/pgbouncer-svc "${PG_PORT}:6432"
-```
-
-Do not continue until the terminal reports `Forwarding from`.
-
----
-
-## 6. Start Direct PostgreSQL Admin Port Forward and Verify Connectivity
-
-`PG_MAINTENANCE_DB` is an existing database used only for administrative operations. It defaults to `postgres`, which is created automatically with a normal PostgreSQL instance. `PG_ADMIN_HOST` and `PG_ADMIN_PORT` must connect directly to PostgreSQL; do not use PgBouncer for database administration.
-
-Start the direct admin port-forward in a separate terminal. `PG_ADMIN_PORT` is the local port; the PostgreSQL service remains on remote port `5432`:
-
-```bash
-kubectl port-forward -n test svc/postgresql "${PG_ADMIN_PORT}:5432"
-```
-
-Run:
-
-```bash
-psql \
-  -h "$PG_ADMIN_HOST" \
-  -p "$PG_ADMIN_PORT" \
-  -U "$PG_USER" \
-  -d "$PG_MAINTENANCE_DB" \
-  -c "SELECT 1;"
-```
-
-Expected result:
-
-```text
- ?column? 
-----------
-        1
-(1 row)
-```
-
-Success requires exit code `0`. If connectivity fails, stop and report.
-
----
-
-## 7. Verify or Create Target Database & PgBouncer Routing
-
-### Idempotent database check
-
-Check whether `$PG_DB` already exists:
-
-```bash
-DB_EXISTS=$(psql -h "$PG_ADMIN_HOST" -p "$PG_ADMIN_PORT" -U "$PG_USER" -d "$PG_MAINTENANCE_DB" -v target_db="$PG_DB" -tAc "SELECT 1 FROM pg_database WHERE datname = :'target_db';")
-
-if [ "$DB_EXISTS" = "1" ]; then
-  echo "Target database '$PG_DB' already exists. Proceeding with idempotent migration."
-else
-  echo "Target database '$PG_DB' does not exist. Creating..."
-  psql -h "$PG_ADMIN_HOST" -p "$PG_ADMIN_PORT" -U "$PG_USER" -d "$PG_MAINTENANCE_DB" -v target_db="$PG_DB" -c 'CREATE DATABASE :"target_db";'
-fi
-```
-
-Verify creation:
-
-```bash
-psql \
-  -h "$PG_ADMIN_HOST" \
-  -p "$PG_ADMIN_PORT" \
-  -U "$PG_USER" \
-  -d "$PG_MAINTENANCE_DB" \
-  -v target_db="$PG_DB" \
-  -tAc "SELECT datname FROM pg_database WHERE datname = :'target_db';"
-```
-
-Expected output: the value of `$PG_DB`
-
-### PgBouncer routing preflight check
-
-After ensuring `$PG_DB` exists, verify that PgBouncer routes connections to it:
-
-```bash
-psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -c "SELECT 1;"
-```
-
-If this fails with a PgBouncer `"no such database"` error:
-- **Stop and report:** `"PgBouncer wildcard routing not enabled; requires operator action to configure PGBOUNCER_DATABASE='*' on the deployment."`
-- **Do not modify Kubernetes:** Never run `kubectl set env` or attempt to reconfigure PgBouncer directly. Shared cluster configuration is operator-only.
-
----
-
-## 8. Run RavenDB → PostgreSQL Migration
-
-Execute the canonical migration command:
-
-```bash
-python3 scripts/migrate_all.py --all
-```
-
-The migration is idempotent (`CREATE TABLE IF NOT EXISTS`, `ON CONFLICT (id)` upserts) and is responsible for:
-- Reading RavenDB source documents.
-- Transforming source data into relational models.
-- Creating PostgreSQL tables and applying indexes.
-- Loading migrated records.
-- Applying post-migration views (`01_student_fee_view.sql`).
-- Applying post-migration triggers (`02_trigger.sql`).
-
-Note: `migrate_all.py` fails hard (exit code 1) if post-migration SQL scripts cannot be found or fail during execution.
-
-### Migration gate
-
-Success requires:
-
-```text
-exit code == 0
-```
-
-If the migration fails:
-- Stop immediately.
-- Do not proceed to schema verification or parity checks.
-- Report the command, exit code, and stdout/stderr.
-
----
-
-## 9. Verify PostgreSQL Schema & Post-Migration Objects
-
-Run post-migration object verification to ensure all views and triggers were applied successfully:
-
-### Verify view
-```bash
-psql \
-  -h "$PG_HOST" \
-  -p "$PG_PORT" \
-  -U "$PG_USER" \
-  -d "$PG_DB" \
-  -c "SELECT 1 FROM student_fee_summary_view LIMIT 1;"
-```
-
-### Verify trigger
-```bash
-psql \
-  -h "$PG_HOST" \
-  -p "$PG_PORT" \
-  -U "$PG_USER" \
-  -d "$PG_DB" \
-  -tAc "SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_student_modified_on';"
-```
-
-Expected output: `1`
-
-### Inspect tables
-```bash
-psql \
-  -h "$PG_HOST" \
-  -p "$PG_PORT" \
-  -U "$PG_USER" \
-  -d "$PG_DB" \
-  -c "\dt"
-```
-
-Tables verified include `course`, `exam`, `fee`, `fee_transaction`, `institute`, `organization`, `persona`, `staff`, and `student`.
-
-### Post-SQL gate
-
-Success requires:
-```text
-exit code == 0
-student_fee_summary_view exists and is queryable
-trg_student_modified_on trigger count == 1
-```
-
----
-
-## 10. Verify RavenDB → PostgreSQL Data Parity
-
-Run the comprehensive parity audit:
-
-```bash
-python3 scripts/verify_raven_to_postgres.py
-```
-
-The verifier writes a JSON report to `validation/exhaustive-parity-report-<timestamp>.json`.
-
-Inspect and programmatically validate the latest report file:
-
-```bash
-python3 -c "
-import json, glob, os, sys
-reports = glob.glob('validation/exhaustive-parity-report-*.json')
-if not reports:
-    print('ERROR: No parity report found in validation/', file=sys.stderr)
-    sys.exit(1)
-latest = max(reports, key=os.path.getctime)
-with open(latest, 'r', encoding='utf-8') as f:
-    data = json.load(f)
-status = data.get('overall_status')
-results = data.get('results', [])
-missing = sum(r.get('missing_in_pg_count', 0) for r in results)
-extra = sum(r.get('extra_in_pg_count', 0) for r in results)
-mismatches = sum(r.get('field_mismatches_count', 0) for r in results)
-print(f'Latest Report: {latest}')
-print(f'Status: {status} | Missing: {missing} | Extra: {extra} | Mismatches: {mismatches}')
-if status != 'PASS' or missing != 0 or extra != 0 or mismatches != 0:
-    print('Parity gate check failed!', file=sys.stderr)
-    sys.exit(1)
-"
-```
-
-### Parity gate
-
-Success requires:
-
-```text
-exit code == 0
-overall_status == "PASS"
-missing_in_pg_count == 0 (across all domains)
-extra_in_pg_count == 0 (across all domains)
-field_mismatches_count == 0 (across all domains)
-```
-
-Any discrepancy is a blocking failure. If parity fails:
-- Stop immediately.
-- Do not start the API or tests.
-- Report the affected domain, counts, and relevant report output.
-
----
-
-## 11. Start .NET 10 Web API
-
-Start the Web API container in detached mode:
-
-```bash
-docker compose up -d --build rpg-api
-```
-
-Verify container status:
-
-```bash
-docker compose ps
-```
-
-The `rpg-api` container must have status `Up`.
-
----
-
-## 12. Wait for API Readiness
-
-Wait for the API health check using the bounded readiness script:
-
-```bash
-bash scripts/wait-for-api.sh http://localhost:5000 60
-```
-
-The script polls `http://localhost:5000/health` every 2 seconds for up to 60 seconds.
-
-### API health gate
-
-Success requires:
-
-```text
-HTTP status == 200
-exit code == 0
-```
-
-If the health check fails or times out:
-- Inspect logs: `docker compose logs rpg-api`
-- Stop and report the failure.
-
----
-
-## 13. Verify Representative API Request
-
-Query the sample endpoint:
-
-```bash
-curl \
-  --fail \
-  --silent \
-  --show-error \
-  "http://localhost:5000/api/stu/student?limit=2"
-```
-
-Success requires:
-```text
-HTTP status == 200
-curl exit code == 0
-```
-
-Swagger UI is available at `http://localhost:5000` for optional human inspection.
-
----
-
-## 14. Run Automated Tests
-
-Execute the automated test suite:
-
-```bash
-docker compose run --rm rpg-tests
-```
-
-### Test gate
-
-Success requires:
-
-```text
-exit code == 0
-```
-
-If tests fail, report the failing test names, error messages, and exit code.
-
----
-
-## 15. Completion Criteria & Final Report
-
-The runbook is complete only when every gate passes:
-
-```text
-[PASS] Prerequisite gate
-[PASS] Expected Kubernetes context verified
-[PASS] PgBouncer reachable
-[PASS] Target PostgreSQL database available
-[PASS] Migration exit code = 0
-[PASS] Post-SQL view and trigger verified
-[PASS] RavenDB/PostgreSQL parity verification passed
-[PASS] Missing records = 0, Extra records = 0, Field mismatches = 0
-[PASS] API health = HTTP 200
-[PASS] Automated tests = exit code 0
-```
-
-Required final report format:
-
-```text
-CT-RPG Local Verification
-
 Preflight:       PASS
 PostgreSQL:      PASS
 Migration:       PASS
@@ -676,41 +252,4 @@ API Health:      PASS
 Tests:           PASS
 
 Overall:         PASS
-```
-
-If any gate fails, overall status is `FAIL`.
-
----
-
-## 16. Teardown
-
-Teardown is optional and should not be run during a standard verification pass.
-
-### Stop application containers
-```bash
-docker compose down
-```
-
-### Terminate background port-forward
-```bash
-if [ -f /tmp/ct-rpg-pgbouncer-port-forward.pid ]; then
-  kill "$(cat /tmp/ct-rpg-pgbouncer-port-forward.pid)" 2>/dev/null || true
-  rm -f /tmp/ct-rpg-pgbouncer-port-forward.pid
-fi
-
-if [ -f /tmp/ct-rpg-postgres-port-forward.pid ]; then
-  kill "$(cat /tmp/ct-rpg-postgres-port-forward.pid)" 2>/dev/null || true
-  rm -f /tmp/ct-rpg-postgres-port-forward.pid
-fi
-```
-
-### Drop target database (Explicit instruction only)
-```bash
-psql \
-  -h "$PG_ADMIN_HOST" \
-  -p "$PG_ADMIN_PORT" \
-  -U "$PG_USER" \
-  -d "$PG_MAINTENANCE_DB" \
-  -v target_db="${PG_DB:-rpg}" \
-  -c 'DROP DATABASE :"target_db" WITH (FORCE);'
 ```

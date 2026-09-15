@@ -114,7 +114,7 @@ cd /c/Users/<your-user>/Desktop/r2pg-migration
 Confirm that these files exist:
 
 ```bash
-ls agent_runbook.md scripts/local-onboard.sh .env certs/free.btl.client.certificate.pfx
+ls agent_runbook.md agent-runbook/scripts/local-onboard.sh .env certs/free.btl.client.certificate.pfx
 ```
 
 ## 6. Sign In and Start Antigravity

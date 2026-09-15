@@ -146,7 +146,7 @@ docker compose up -d --build rpg-postgres rpg-api
 #### 🔌 Connect pgAdmin / DBeaver to PostgreSQL:
 - **Host**: `localhost` (or `127.0.0.1`)
 - **Port**: **`15432`**
-- **Maintenance database**: `rpg`
+- **Application database**: `rpg`
 - **Username**: `postgres`
 - **Password**: `<your-postgres-password>` (as configured in `.env`)
 

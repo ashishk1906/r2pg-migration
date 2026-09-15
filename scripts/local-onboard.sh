@@ -17,6 +17,8 @@ TMP_DIR="${TMPDIR:-${TEMP:-/tmp}}"
 mkdir -p "$TMP_DIR"
 PF_PID_FILE="$TMP_DIR/ct-rpg-pgbouncer-port-forward.pid"
 PF_LOG_FILE="$TMP_DIR/ct-rpg-pgbouncer-port-forward.log"
+ADMIN_PF_PID_FILE="$TMP_DIR/ct-rpg-postgres-port-forward.pid"
+ADMIN_PF_LOG_FILE="$TMP_DIR/ct-rpg-postgres-port-forward.log"
 
 PF_PID=""
 
@@ -34,6 +36,15 @@ cleanup() {
     fi
   fi
   rm -f "$PF_PID_FILE" 2>/dev/null || true
+  if [ -f "$ADMIN_PF_PID_FILE" ]; then
+    local admin_pid
+    admin_pid=$(cat "$ADMIN_PF_PID_FILE" 2>/dev/null || true)
+    if [ -n "$admin_pid" ] && kill -0 "$admin_pid" 2>/dev/null; then
+      echo "[cleanup] Stopping direct PostgreSQL port-forward (PID: $admin_pid)..."
+      kill "$admin_pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$ADMIN_PF_PID_FILE" 2>/dev/null || true
   if [ "$exit_code" -ne 0 ]; then
     echo ""
     echo "========================================="
@@ -76,6 +87,9 @@ set +a
 export PGPASSWORD="$PG_PASSWORD"
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-6432}"
+PG_ADMIN_HOST="${PG_ADMIN_HOST:-localhost}"
+PG_ADMIN_PORT="${PG_ADMIN_PORT:-5432}"
+PG_MAINTENANCE_DB="${PG_MAINTENANCE_DB:-postgres}"
 PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-rpg}"
 API_PORT="${API_PORT:-5000}"
@@ -106,25 +120,53 @@ else
     fi
   fi
 
-  echo "[-] Starting kubectl port-forward for svc/pgbouncer-svc ($PG_PORT:$PG_PORT)..."
-  kubectl port-forward -n test svc/pgbouncer-svc "${PG_PORT}:${PG_PORT}" > "$PF_LOG_FILE" 2>&1 &
+  echo "[-] Starting kubectl port-forward for svc/pgbouncer-svc ($PG_PORT:6432)..."
+  kubectl port-forward -n test svc/pgbouncer-svc "${PG_PORT}:6432" > "$PF_LOG_FILE" 2>&1 &
   PF_PID=$!
   echo "$PF_PID" > "$PF_PID_FILE"
 
   bash scripts/wait-for-port-forward.sh "$PF_LOG_FILE" "$PG_PORT" 30
 fi
 
-echo "[-] Verifying PostgreSQL connectivity via maintenance database ctlytics_test..."
-psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d ctlytics_test -c "SELECT 1;" >/dev/null
+if [ "$PG_ADMIN_HOST" = "localhost" ] || [ "$PG_ADMIN_HOST" = "127.0.0.1" ]; then
+  ADMIN_PORT_IN_USE=$(python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(1)
+result = s.connect_ex(('127.0.0.1', int('$PG_ADMIN_PORT')))
+s.close()
+print('YES' if result == 0 else 'NO')
+")
+
+  if [ "$ADMIN_PORT_IN_USE" != "YES" ]; then
+    # Clean up stale admin PID file if process died
+    if [ -f "$ADMIN_PF_PID_FILE" ]; then
+      stale_admin_pid=$(cat "$ADMIN_PF_PID_FILE" 2>/dev/null || true)
+      if [ -n "$stale_admin_pid" ] && ! kill -0 "$stale_admin_pid" 2>/dev/null; then
+        rm -f "$ADMIN_PF_PID_FILE"
+      fi
+    fi
+
+    echo "[-] Starting direct PostgreSQL port-forward for database administration ($PG_ADMIN_PORT:5432)..."
+    kubectl port-forward -n test svc/postgresql "${PG_ADMIN_PORT}:5432" > "$ADMIN_PF_LOG_FILE" 2>&1 &
+    echo "$!" > "$ADMIN_PF_PID_FILE"
+    bash scripts/wait-for-port-forward.sh "$ADMIN_PF_LOG_FILE" "$PG_ADMIN_PORT" 30
+  fi
+else
+  echo "[-] Using externally configured direct PostgreSQL admin host '$PG_ADMIN_HOST'."
+fi
+
+echo "[-] Verifying direct PostgreSQL connectivity via maintenance database '$PG_MAINTENANCE_DB'..."
+psql -h "$PG_ADMIN_HOST" -p "$PG_ADMIN_PORT" -U "$PG_USER" -d "$PG_MAINTENANCE_DB" -c "SELECT 1;" >/dev/null
 
 echo "[-] Checking target database '$PG_DB'..."
-DB_EXISTS=$(psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d ctlytics_test -tAc "SELECT 1 FROM pg_database WHERE datname = '$PG_DB';")
+DB_EXISTS=$(psql -h "$PG_ADMIN_HOST" -p "$PG_ADMIN_PORT" -U "$PG_USER" -d "$PG_MAINTENANCE_DB" -v target_db="$PG_DB" -tAc "SELECT 1 FROM pg_database WHERE datname = :'target_db';")
 
 if [ "$DB_EXISTS" = "1" ]; then
   echo "[-] Target database '$PG_DB' already exists. Proceeding with idempotent migration."
 else
   echo "[-] Target database '$PG_DB' does not exist. Creating..."
-  psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d ctlytics_test -c "CREATE DATABASE $PG_DB;"
+  psql -h "$PG_ADMIN_HOST" -p "$PG_ADMIN_PORT" -U "$PG_USER" -d "$PG_MAINTENANCE_DB" -v target_db="$PG_DB" -c 'CREATE DATABASE :"target_db";'
 fi
 
 # Preflight routing check for PgBouncer

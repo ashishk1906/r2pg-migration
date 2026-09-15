@@ -1,109 +1,141 @@
-# 🚀 Antigravity CLI Agent Execution Playbook
+# CT-RPG Agent Runbook Guide
 
-A simple, complete guide on installing the **Antigravity CLI (`agy`)** and running the **[AGENT_RUNBOOK.md](file:///c:/Users/aks89/Desktop/CT-RPG/AGENT_RUNBOOK.md)**.
+Use this guide to install Antigravity and run `agent_runbook.md`.
 
----
+## 1. Install Antigravity
 
-## 1. Install & Set Up Antigravity CLI
+### Windows PowerShell
 
-### A. Installation
+Open PowerShell and run:
 
-#### Windows (PowerShell):
 ```powershell
-# Install via official installer script
 irm https://antigravity.google/install.ps1 | iex
 ```
 
-#### macOS / Linux (Terminal / Bash):
+### macOS/Linux/Git Bash/WSL
+
+Run:
+
 ```bash
-# Install via curl installer script
 curl -fsSL https://antigravity.google/install.sh | bash
 ```
 
-*(Alternatively, if installing the Python SDK & CLI bundle:)*
-```bash
-pip install google-antigravity
-```
+Verify the installation:
 
----
-
-### B. Verify Installation & Authenticate
 ```bash
-# Verify the binary is installed
 agy --version
-
-# Authenticate on first run (follows browser login prompt)
-agy login
 ```
 
----
+A version number should be displayed.
 
-## 2. Running the Agent Runbook via CLI
+> No additional agent installation is required. Antigravity is the agent used for this runbook.
 
-Choose whichever method best suits your workflow:
+## 2. Clone the Repository
 
-### 🔹 Option 1: One-Shot Terminal Command (Headless)
-Run this single command from the project root directory:
+Run this from PowerShell, Git Bash, or WSL:
 
 ```bash
-agy "Execute AGENT_RUNBOOK.md end-to-end. Run all 6 gates sequentially (prerequisites, port-forward, migration, parity, API, and tests) and print the final verification table."
+git clone https://github.com/ashishk1906/r2pg-migration.git
+cd r2pg-migration
 ```
 
----
+If the repository is already cloned, only change into its directory:
 
-### 🔹 Option 2: Interactive Terminal Mode (TUI)
-
-1. Open your terminal in the project directory:
-   ```bash
-   cd c:\Users\aks89\Desktop\CT-RPG
-   agy
-   ```
-
-2. Send the agent the prompt with file reference:
-   ```text
-   @AGENT_RUNBOOK.md Please execute this runbook step-by-step, verify all 6 gates, and print the completion report.
-   ```
-
----
-
-### 🔹 Option 3: Autonomous Run with `/goal` (Recommended)
-
-When using interactive mode, you can trigger the `/goal` command for thorough, fully autonomous execution:
-
-```text
-/goal Follow AGENT_RUNBOOK.md:
-1. Verify prerequisites with bash scripts/verify-prerequisites.sh
-2. Ensure PgBouncer port-forward is running and verify DB connection
-3. Run migration with python3 scripts/migrate_all.py --all
-4. Run parity audit with python3 scripts/verify_raven_to_postgres.py
-5. Start API container (docker compose up -d --build rpg-api) and check /health
-6. Run tests with docker compose run --rm rpg-tests
-7. Print the final verification summary table
+```powershell
+cd C:\Users\<your-user>\Desktop\r2pg-migration
 ```
 
----
+## 3. Configure `.env`
 
-## 3. What the Agent Executes (The 6 Gates)
+Create the local environment file:
 
-| Gate | Target / Action | Pass Condition |
-|---|---|---|
-| **Gate 1: Preflight** | `bash scripts/verify-prerequisites.sh` | Exit code `0` |
-| **Gate 2: DB Connectivity** | `psql -h $PG_HOST -p $PG_PORT -U $PG_USER -d ctlytics_test -c "SELECT 1;"` | Exit code `0` |
-| **Gate 3: Data Migration** | `python3 scripts/migrate_all.py --all` | Exit code `0` + View/Trigger verified |
-| **Gate 4: Parity Audit** | `python3 scripts/verify_raven_to_postgres.py` | Exit code `0` + 0 discrepancies |
-| **Gate 5: Web API Health** | `bash scripts/wait-for-api.sh http://localhost:5000 60` | HTTP `200` |
-| **Gate 6: Test Suite** | `docker compose run --rm rpg-tests` | Exit code `0` |
+```bash
+cp .env.example .env
+```
 
----
+Open `.env`, keep the existing settings, and enter the correct real password and credentials. At minimum, verify these values:
 
-## 4. Expected Final Report Output
+```dotenv
+EXPECTED_K8S_CONTEXT=do-blr1-k8s-1-22-8-do-1-blr1-1655977229480
 
-Once execution finishes, the agent will present the status summary:
+PG_HOST=localhost
+PG_PORT=6432
+PG_ADMIN_HOST=localhost
+PG_ADMIN_PORT=5432
+PG_MAINTENANCE_DB=postgres
+PG_DB=rpg
+PG_USER=postgres
+PG_PASSWORD=<your-real-postgres-password>
+
+API_PORT=5000
+RAVEN_URL=https://a.free.btl.ravendb.cloud
+RAVEN_DB=BTL
+RAVEN_CERT_FILE=certs/free.btl.client.certificate.pfx
+```
+
+Do not commit `.env` or print the password.
+
+## 4. Download and Place the RavenDB Certificate
+
+Download the certificate from the project link:
+
+[Download RavenDB client certificate](https://drive.google.com/file/d/1tcdrDU3Q1zzWBqs-BS0_0PGGvXjR2INI/view?usp=drive_link)
+
+Place the downloaded file at this exact path inside the repository:
 
 ```text
-===========================
-CT-RPG Verification Report
-===========================
+r2pg-migration/certs/free.btl.client.certificate.pfx
+```
+
+The path must match `RAVEN_CERT_FILE` in `.env`.
+
+## 5. Open the Repository Terminal
+
+Open a new terminal and change to the repository folder:
+
+### PowerShell
+
+```powershell
+cd C:\Users\<your-user>\Desktop\r2pg-migration
+```
+
+### Git Bash
+
+```bash
+cd /c/Users/<your-user>/Desktop/r2pg-migration
+```
+
+Confirm that these files exist:
+
+```bash
+ls agent_runbook.md scripts/local-onboard.sh .env certs/free.btl.client.certificate.pfx
+```
+
+## 6. Sign In and Start Antigravity
+
+Start Antigravity:
+
+```bash
+agy
+```
+
+If Antigravity asks you to sign in, complete the browser sign-in flow. If it is already authenticated, continue.
+
+## 7. Send This Prompt
+
+Paste this exact prompt into Antigravity:
+
+```text
+Execute agent_runbook.md end-to-end from the repository root. Run every gate in order, stop on any failure, never print secrets, and report the final PASS/FAIL table with the failed command and non-secret error output if applicable.
+```
+
+The agent should follow `agent_runbook.md`, including the prerequisite check, PostgreSQL setup, migration, parity verification, API health check, and automated tests.
+
+## 8. Expected Output
+
+When everything succeeds, Antigravity should report:
+
+```text
 Preflight:       PASS
 PostgreSQL:      PASS
 Migration:       PASS
@@ -113,5 +145,6 @@ API Health:      PASS
 Tests:           PASS
 
 Overall:         PASS
-===========================
 ```
+
+If any step fails, the agent must stop and report the failed command, exit code, and relevant non-secret error output. Do not continue by skipping a failed gate.

@@ -52,7 +52,10 @@ prerequisites:
     note: "PGBOUNCER_DATABASE='*' routing is a cluster bootstrap precondition managed by operators. Agents must never run kubectl set env to mutate PgBouncer."
 
   postgres:
-    maintenance_database: "ctlytics_test"
+    maintenance_database: "postgres"
+    admin_host_variable: "PG_ADMIN_HOST"
+    admin_port_variable: "PG_ADMIN_PORT"
+    maintenance_database_variable: "PG_MAINTENANCE_DB"
     target_database: "rpg"
     required_role: "postgres"
     required_privileges:
@@ -78,6 +81,9 @@ prerequisites:
       - "EXPECTED_K8S_CONTEXT"
       - "PG_HOST"
       - "PG_PORT"
+      - "PG_ADMIN_HOST"
+      - "PG_ADMIN_PORT"
+      - "PG_MAINTENANCE_DB"
       - "PG_DB"
       - "PG_USER"
       - "PG_PASSWORD"
@@ -96,8 +102,8 @@ commands:
   preflight: "bash scripts/verify-prerequisites.sh"
   wait_port_forward: "bash scripts/wait-for-port-forward.sh /tmp/ct-rpg-pgbouncer-port-forward.log 6432 30"
   migrate: "python3 scripts/migrate_all.py --all"
-  post_sql_check_view: "psql -h $PG_HOST -p $PG_PORT -U $PG_USER -d rpg -c \"SELECT 1 FROM student_fee_summary_view LIMIT 1;\""
-  post_sql_check_trigger: "psql -h $PG_HOST -p $PG_PORT -U $PG_USER -d rpg -tAc \"SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_student_modified_on';\""
+  post_sql_check_view: "psql -h $PG_HOST -p $PG_PORT -U $PG_USER -d $PG_DB -c \"SELECT 1 FROM student_fee_summary_view LIMIT 1;\""
+  post_sql_check_trigger: "psql -h $PG_HOST -p $PG_PORT -U $PG_USER -d $PG_DB -tAc \"SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_student_modified_on';\""
   verify_parity: "python3 scripts/verify_raven_to_postgres.py"
   start_api: "docker compose up -d --build rpg-api"
   wait_api: "bash scripts/wait-for-api.sh http://localhost:5000 60"
@@ -131,7 +137,7 @@ agent_execution_rules:
   - "Do not request interactive input."
   - "Do not print secrets or certificate contents."
   - "Treat missing credentials, configuration, or certificates as blocking preconditions."
-  - "If target database 'rpg' already exists, proceed and log; do not drop or recreate unless explicitly instructed."
+  - "If target database $PG_DB already exists, proceed and log; do not drop or recreate unless explicitly instructed."
   - "Stop immediately when a required gate fails."
   - "Do not bypass a failed migration, post-SQL, parity, health, or test gate."
   - "On failure, report the step, command, exit code, and relevant stdout/stderr."
@@ -203,18 +209,7 @@ If any gate fails, `local-onboard.sh` stops immediately, reports the error, and 
 
 For granular step-by-step execution or manual debugging, follow the individual sections below.
 
-## 1. Clone Repository
-
-```bash
-git clone https://github.com/ashishk1906/r2pg-migration.git
-cd r2pg-migration
-```
-
-All commands in this playbook must be run from the repository root unless explicitly stated otherwise.
-
----
-
-## 2. Configure Local Environment
+## 1. Configure Local Environment
 
 Create the local environment file if it does not already exist:
 
@@ -229,6 +224,9 @@ EXPECTED_K8S_CONTEXT=do-blr1-k8s-1-22-8-do-1-blr1-1655977229480
 
 PG_HOST=localhost
 PG_PORT=6432
+PG_ADMIN_HOST=localhost
+PG_ADMIN_PORT=5432
+PG_MAINTENANCE_DB=postgres
 PG_DB=rpg
 PG_USER=postgres
 PG_PASSWORD=<postgres-password>
@@ -256,7 +254,7 @@ Secrets must be supplied through `.env`, the environment, or an approved credent
 
 ---
 
-## 2.1 Set Up Non-Interactive Environment
+## 1.1 Set Up Non-Interactive Environment
 
 To comply with non-interactive execution (`interactive_input_allowed: false`), create a Python virtual environment and export `.env` variables (including `PGPASSWORD`) once into your shell:
 
@@ -269,11 +267,11 @@ set +a
 export PGPASSWORD="$PG_PASSWORD"
 ```
 
-Throughout this playbook, all `psql` invocations use `$PG_HOST`, `$PG_PORT`, and `$PG_USER` from `.env` with non-interactive authentication.
+Administrative `psql` invocations use `$PG_ADMIN_HOST`, `$PG_ADMIN_PORT`, and `$PG_MAINTENANCE_DB`; application and migration invocations use `$PG_HOST`, `$PG_PORT`, and `$PG_DB`. All use `$PG_USER` and non-interactive authentication.
 
 ---
 
-## 3. Install RavenDB Certificate
+## 2. Install RavenDB Certificate
 
 > [!NOTE]
 > `RAVEN_CERT_FILE` is resolved **relative to the repo root** — the directory from which you run migration commands. The default value `certs/free.btl.client.certificate.pfx` means the file must be placed at `<repo-root>/certs/free.btl.client.certificate.pfx`. Do not place it inside `scripts/`.
@@ -291,7 +289,7 @@ certs/free.btl.client.certificate.pfx
 
 ---
 
-## 4. Run Prerequisite Gate
+## 3. Run Prerequisite Gate
 
 Execute the machine-checkable verification script:
 
@@ -321,21 +319,9 @@ exit code == 0
 
 If the script exits non-zero, stop immediately and report the failures.
 
-> **Diagnostic fallback:** If needed for manual troubleshooting, run:
-> ```bash
-> kubectl version --client
-> psql --version
-> python3 --version
-> docker version
-> docker compose version
-> kubectl config current-context
-> kubectl get namespace test
-> kubectl get svc pgbouncer-svc -n test
-> ```
-
 ---
 
-## 5. Install Migration Dependencies
+## 4. Install Migration Dependencies
 
 Run within the active virtual environment:
 
@@ -347,82 +333,36 @@ Success requires exit code `0`.
 
 ---
 
-## 6. Start PgBouncer Port Forward
+## 5. Start PgBouncer Port Forward
 
-### Check port availability
-
-Check if local port `6432` is already listening (cross-platform):
+Start the forward in a separate terminal. `PG_PORT` is the local port; the PgBouncer service remains on remote port `6432`:
 
 ```bash
-PORT_BUSY=$(python3 -c "import socket; s=socket.socket(); res=s.connect_ex(('127.0.0.1', 6432)); s.close(); print('BUSY' if res==0 else 'FREE')")
-if [ "$PORT_BUSY" = "BUSY" ]; then
-  echo "Port 6432 is already occupied" >&2
-  exit 1
-fi
+kubectl port-forward -n test svc/pgbouncer-svc "${PG_PORT}:6432"
 ```
 
-### Temporary directory & PID handling
-
-Resolve a writable temporary directory across Linux, macOS, and Windows Git Bash/WSL:
-
-```bash
-TMP_DIR="${TMPDIR:-${TEMP:-/tmp}}"
-mkdir -p "$TMP_DIR"
-PF_PID_FILE="$TMP_DIR/ct-rpg-pgbouncer-port-forward.pid"
-PF_LOG_FILE="$TMP_DIR/ct-rpg-pgbouncer-port-forward.log"
-```
-
-If a port-forward PID file exists from a previous session, verify if the process is still running:
-
-```bash
-if [ -f "$PF_PID_FILE" ]; then
-  PID=$(cat "$PF_PID_FILE" 2>/dev/null || true)
-  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-    echo "Port-forward process $PID is already running" >&2
-    exit 1
-  else
-    rm -f "$PF_PID_FILE"
-  fi
-fi
-```
-
-### Start port-forward
-
-Start the forward in the background:
-
-```bash
-kubectl port-forward -n test svc/pgbouncer-svc 6432:6432 \
-  > "$PF_LOG_FILE" 2>&1 &
-
-echo $! > "$PF_PID_FILE"
-```
-
-### Wait for readiness
-
-Wait for the port-forward using the bounded readiness script:
-
-```bash
-bash scripts/wait-for-port-forward.sh "$PF_LOG_FILE" 6432 30
-```
-
-The script polls the log file for `"Forwarding from"` and halts immediately if `"error:"` is detected.
-
-Do not continue until the port-forward is confirmed ready with exit code `0`.
+Do not continue until the terminal reports `Forwarding from`.
 
 ---
 
-## 7. Verify PostgreSQL Connectivity
+## 6. Start Direct PostgreSQL Admin Port Forward and Verify Connectivity
 
-`ctlytics_test` is the existing maintenance database used for initial connectivity and administrative operations.
+`PG_MAINTENANCE_DB` is an existing database used only for administrative operations. It defaults to `postgres`, which is created automatically with a normal PostgreSQL instance. `PG_ADMIN_HOST` and `PG_ADMIN_PORT` must connect directly to PostgreSQL; do not use PgBouncer for database administration.
+
+Start the direct admin port-forward in a separate terminal. `PG_ADMIN_PORT` is the local port; the PostgreSQL service remains on remote port `5432`:
+
+```bash
+kubectl port-forward -n test svc/postgresql "${PG_ADMIN_PORT}:5432"
+```
 
 Run:
 
 ```bash
 psql \
-  -h "$PG_HOST" \
-  -p "$PG_PORT" \
+  -h "$PG_ADMIN_HOST" \
+  -p "$PG_ADMIN_PORT" \
   -U "$PG_USER" \
-  -d ctlytics_test \
+  -d "$PG_MAINTENANCE_DB" \
   -c "SELECT 1;"
 ```
 
@@ -439,20 +379,20 @@ Success requires exit code `0`. If connectivity fails, stop and report.
 
 ---
 
-## 8. Verify or Create Target Database & PgBouncer Routing
+## 7. Verify or Create Target Database & PgBouncer Routing
 
 ### Idempotent database check
 
-Check whether `rpg` already exists:
+Check whether `$PG_DB` already exists:
 
 ```bash
-DB_EXISTS=$(psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d ctlytics_test -tAc "SELECT 1 FROM pg_database WHERE datname = 'rpg';")
+DB_EXISTS=$(psql -h "$PG_ADMIN_HOST" -p "$PG_ADMIN_PORT" -U "$PG_USER" -d "$PG_MAINTENANCE_DB" -v target_db="$PG_DB" -tAc "SELECT 1 FROM pg_database WHERE datname = :'target_db';")
 
 if [ "$DB_EXISTS" = "1" ]; then
-  echo "Target database 'rpg' already exists. Proceeding with idempotent migration."
+  echo "Target database '$PG_DB' already exists. Proceeding with idempotent migration."
 else
-  echo "Target database 'rpg' does not exist. Creating..."
-  psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d ctlytics_test -c "CREATE DATABASE rpg;"
+  echo "Target database '$PG_DB' does not exist. Creating..."
+  psql -h "$PG_ADMIN_HOST" -p "$PG_ADMIN_PORT" -U "$PG_USER" -d "$PG_MAINTENANCE_DB" -v target_db="$PG_DB" -c 'CREATE DATABASE :"target_db";'
 fi
 ```
 
@@ -460,21 +400,22 @@ Verify creation:
 
 ```bash
 psql \
-  -h "$PG_HOST" \
-  -p "$PG_PORT" \
+  -h "$PG_ADMIN_HOST" \
+  -p "$PG_ADMIN_PORT" \
   -U "$PG_USER" \
-  -d ctlytics_test \
-  -tAc "SELECT datname FROM pg_database WHERE datname = 'rpg';"
+  -d "$PG_MAINTENANCE_DB" \
+  -v target_db="$PG_DB" \
+  -tAc "SELECT datname FROM pg_database WHERE datname = :'target_db';"
 ```
 
-Expected output: `rpg`
+Expected output: the value of `$PG_DB`
 
 ### PgBouncer routing preflight check
 
-After ensuring `rpg` exists, verify that PgBouncer routes connections to it:
+After ensuring `$PG_DB` exists, verify that PgBouncer routes connections to it:
 
 ```bash
-psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d rpg -c "SELECT 1;"
+psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -c "SELECT 1;"
 ```
 
 If this fails with a PgBouncer `"no such database"` error:
@@ -483,7 +424,7 @@ If this fails with a PgBouncer `"no such database"` error:
 
 ---
 
-## 9. Run RavenDB → PostgreSQL Migration
+## 8. Run RavenDB → PostgreSQL Migration
 
 Execute the canonical migration command:
 
@@ -516,7 +457,7 @@ If the migration fails:
 
 ---
 
-## 10. Verify PostgreSQL Schema & Post-Migration Objects
+## 9. Verify PostgreSQL Schema & Post-Migration Objects
 
 Run post-migration object verification to ensure all views and triggers were applied successfully:
 
@@ -526,7 +467,7 @@ psql \
   -h "$PG_HOST" \
   -p "$PG_PORT" \
   -U "$PG_USER" \
-  -d rpg \
+  -d "$PG_DB" \
   -c "SELECT 1 FROM student_fee_summary_view LIMIT 1;"
 ```
 
@@ -536,7 +477,7 @@ psql \
   -h "$PG_HOST" \
   -p "$PG_PORT" \
   -U "$PG_USER" \
-  -d rpg \
+  -d "$PG_DB" \
   -tAc "SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_student_modified_on';"
 ```
 
@@ -548,7 +489,7 @@ psql \
   -h "$PG_HOST" \
   -p "$PG_PORT" \
   -U "$PG_USER" \
-  -d rpg \
+  -d "$PG_DB" \
   -c "\dt"
 ```
 
@@ -565,7 +506,7 @@ trg_student_modified_on trigger count == 1
 
 ---
 
-## 11. Verify RavenDB → PostgreSQL Data Parity
+## 10. Verify RavenDB → PostgreSQL Data Parity
 
 Run the comprehensive parity audit:
 
@@ -619,7 +560,7 @@ Any discrepancy is a blocking failure. If parity fails:
 
 ---
 
-## 12. Start .NET 10 Web API
+## 11. Start .NET 10 Web API
 
 Start the Web API container in detached mode:
 
@@ -637,7 +578,7 @@ The `rpg-api` container must have status `Up`.
 
 ---
 
-## 13. Wait for API Readiness
+## 12. Wait for API Readiness
 
 Wait for the API health check using the bounded readiness script:
 
@@ -662,7 +603,7 @@ If the health check fails or times out:
 
 ---
 
-## 14. Verify Representative API Request
+## 13. Verify Representative API Request
 
 Query the sample endpoint:
 
@@ -684,16 +625,13 @@ Swagger UI is available at `http://localhost:5000` for optional human inspection
 
 ---
 
-## 15. Run Automated Tests
+## 14. Run Automated Tests
 
 Execute the automated test suite:
 
 ```bash
 docker compose run --rm rpg-tests
 ```
-
-> [!NOTE]
-> `DbWriteTests` inserts and subsequently deletes a `fee_transaction` row during the test run. The `trg_fee_transaction_modified_on` trigger will leave audit trail records in `fee_transaction_audit`. This is expected behavior and not a data defect.
 
 ### Test gate
 
@@ -707,49 +645,9 @@ If tests fail, report the failing test names, error messages, and exit code.
 
 ---
 
-## 16. Optional Database Inspection
+## 15. Completion Criteria & Final Report
 
-Informational queries for diagnosis and manual inspection:
-
-### Record counts
-```sql
-SELECT 'organization' AS entity, COUNT(*) FROM organization
-UNION ALL SELECT 'institute', COUNT(*) FROM institute
-UNION ALL SELECT 'student', COUNT(*) FROM student
-UNION ALL SELECT 'fee', COUNT(*) FROM fee
-UNION ALL SELECT 'fee_transaction', COUNT(*) FROM fee_transaction
-UNION ALL SELECT 'persona', COUNT(*) FROM persona
-UNION ALL SELECT 'course', COUNT(*) FROM course
-UNION ALL SELECT 'staff', COUNT(*) FROM staff
-UNION ALL SELECT 'exam', COUNT(*) FROM exam;
-```
-
-### View query
-```sql
-SELECT student_code, student_name, course_name, fee_name, amount, paid_amount, status
-FROM student_fee_summary_view
-LIMIT 5;
-```
-
----
-
-## 17. Optional pgAdmin Connection
-
-For manual inspection:
-
-```text
-Host:                 localhost
-Port:                 6432
-Maintenance database: rpg
-Username:             postgres
-Password:             value of PG_PASSWORD
-```
-
----
-
-## 18. Completion Criteria & Final Report
-
-The playbook is complete only when every gate passes:
+The runbook is complete only when every gate passes:
 
 ```text
 [PASS] Prerequisite gate
@@ -784,7 +682,7 @@ If any gate fails, overall status is `FAIL`.
 
 ---
 
-## 19. Teardown
+## 16. Teardown
 
 Teardown is optional and should not be run during a standard verification pass.
 
@@ -799,14 +697,20 @@ if [ -f /tmp/ct-rpg-pgbouncer-port-forward.pid ]; then
   kill "$(cat /tmp/ct-rpg-pgbouncer-port-forward.pid)" 2>/dev/null || true
   rm -f /tmp/ct-rpg-pgbouncer-port-forward.pid
 fi
+
+if [ -f /tmp/ct-rpg-postgres-port-forward.pid ]; then
+  kill "$(cat /tmp/ct-rpg-postgres-port-forward.pid)" 2>/dev/null || true
+  rm -f /tmp/ct-rpg-postgres-port-forward.pid
+fi
 ```
 
 ### Drop target database (Explicit instruction only)
 ```bash
 psql \
-  -h "$PG_HOST" \
-  -p "$PG_PORT" \
+  -h "$PG_ADMIN_HOST" \
+  -p "$PG_ADMIN_PORT" \
   -U "$PG_USER" \
-  -d ctlytics_test \
-  -c "DROP DATABASE rpg WITH (FORCE);"
+  -d "$PG_MAINTENANCE_DB" \
+  -v target_db="${PG_DB:-rpg}" \
+  -c 'DROP DATABASE :"target_db" WITH (FORCE);'
 ```

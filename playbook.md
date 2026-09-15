@@ -1,7 +1,24 @@
-﻿# Local Testing & Onboarding Playbook
+# Local Testing & Onboarding Playbook
 ## CT-RPG: RavenDB to PostgreSQL Migration & .NET 10 Web API
 
-A guide for developers to configure credentials, connect to the Kubernetes PostgreSQL cluster via PgBouncer port-forward, create the target database, run migrations, verify data parity, and execute tests.
+A comprehensive, step-by-step guide for developers to configure credentials, connect to the Kubernetes PostgreSQL cluster, create the target database, migrate data from RavenDB, audit data parity, and run the .NET 10 Web API.
+
+---
+
+## Overview: What We Are Doing Here
+
+This project migrates legacy data from **RavenDB** (NoSQL document store) into **PostgreSQL** (relational database), and validates it using a **.NET 10 Web API**.
+
+Here is the high-level workflow in **6 simple steps**:
+
+1. **Setup Credentials & Certificate**: Configure your local `.env` and place the RavenDB `.pfx` client certificate in `certs/`.
+2. **Open Database Port-Forwards**: Connect to the Kubernetes cluster on two distinct ports:
+   - **Port `5432` (Direct PostgreSQL)**: Used strictly for administrative DDL (`CREATE DATABASE`, `DROP DATABASE`).
+   - **Port `6432` (PgBouncer)**: Used for application connectivity, migration scripts, and connection pooling.
+3. **Initialize Target Database**: Connect to PostgreSQL on port `5432`, create the target database (`rpg`), and verify PgBouncer can route traffic to it on port `6432`.
+4. **Execute Data Migration (ETL)**: Run the Python migration pipeline to extract collections from RavenDB, transform them into relational records, and populate tables, indexes, views, and triggers.
+5. **Verify 100% Data Parity**: Run the parity audit tool to compare RavenDB source documents against PostgreSQL rows, ensuring **zero** missing, extra, or mismatched records.
+6. **Start Web API & Run Tests**: Spin up the .NET 10 Web API container via Docker Compose, verify the `/health` endpoint and Swagger UI, and run automated integration tests.
 
 ---
 
@@ -65,6 +82,9 @@ Update `.env` with these values for Kubernetes:
 |---|---|---|
 | `PG_HOST` | `localhost` | PostgreSQL host (via port-forward) |
 | `PG_PORT` | `6432` | PgBouncer port |
+| `PG_ADMIN_HOST` | `localhost` | Direct PostgreSQL host for database administration |
+| `PG_ADMIN_PORT` | `5432` | Direct PostgreSQL port for database administration |
+| `PG_MAINTENANCE_DB` | `postgres` | Existing database used for administrative SQL |
 | `PG_DB` | `rpg` | Target PostgreSQL database name |
 | `PG_USER` | `postgres` | Username |
 | `PG_PASSWORD` | `<your-postgres-password>` | PostgreSQL password |
@@ -92,7 +112,7 @@ certs/<your-client-certificate>.pfx
 > **Cluster prerequisite — not an onboarding step:** PgBouncer must already be provisioned with wildcard routing (`PGBOUNCER_DATABASE=*`). This is an environment/bootstrap responsibility configured by the platform team during cluster setup. Individual developers do not modify PgBouncer configuration during onboarding.
 
 > [!NOTE]
-> **DB administration uses a direct PostgreSQL connection (not PgBouncer).** DDL commands (`CREATE DATABASE`, `DROP DATABASE`) run through **Terminal C: postgres-admin** on port `5432`, which port-forwards directly to `svc/postgresql`. PgBouncer (port `6432`) is reserved for application connectivity and migration scripts only. `ctlytics_test` is used as the superuser maintenance database because `rpg` does not exist yet at this point.
+> **DB administration uses a direct PostgreSQL connection (not PgBouncer).** DDL commands (`CREATE DATABASE`, `DROP DATABASE`) run through **Terminal C: postgres-admin** on port `5432`, which port-forwards directly to `svc/postgresql`. PgBouncer (port `6432`) is reserved for application connectivity and migration scripts. `PG_MAINTENANCE_DB` defaults to the standard `postgres` database and can be set to any existing database on the same PostgreSQL instance.
 
 ### Step 1: Start Port-Forwarding
 You need two port-forwards running simultaneously in separate terminals.
@@ -114,14 +134,11 @@ kubectl port-forward -n test svc/postgresql 5432:5432
 > ```
 > Wait a few minutes and run the command again. Keep both terminals open for the entire session.
 
-### Step 2: Verify Connectivity (Gate 1)
-In **Terminal B: repository commands**, confirm the cluster is reachable via both connections:
+### Step 2: Verify Direct Admin Connectivity (Gate 1)
+In **Terminal B: repository commands**, confirm the direct PostgreSQL admin connection is reachable. The target database may not exist yet, so do not use PgBouncer for this initial check:
 ```bash
-# PgBouncer (app connectivity)
-psql -h localhost -p 6432 -U postgres -d ctlytics_test -c "SELECT 1;"
-
 # Direct PostgreSQL (admin)
-psql -h localhost -p 5432 -U postgres -d ctlytics_test -c "SELECT 1;"
+psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1;"
 ```
 Expected result for each:
 ```
@@ -130,17 +147,17 @@ Expected result for each:
         1
 (1 row)
 ```
-**Gate 1 passed** — both connections are reachable. Proceed to create the target database.
+**Gate 1 passed** — direct PostgreSQL administration is reachable. Proceed to create or verify the target database.
 
 ### Step 3: Create the `rpg` Database
 Run DDL directly against PostgreSQL (port `5432`) — not through PgBouncer:
 ```bash
-psql -h localhost -p 5432 -U postgres -d ctlytics_test -c "CREATE DATABASE rpg;"
+psql -h localhost -p 5432 -U postgres -d postgres -c "CREATE DATABASE rpg;"
 ```
 
 Verify the database was created:
 ```bash
-psql -h localhost -p 5432 -U postgres -d ctlytics_test -c "SELECT datname FROM pg_database WHERE datname = 'rpg';"
+psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT datname FROM pg_database WHERE datname = 'rpg';"
 ```
 Expected output:
 ```
@@ -149,7 +166,11 @@ Expected output:
  rpg
 (1 row)
 ```
-Expected result — `rpg` database is created. Move to the next step.
+Expected result — `rpg` database is available. Now verify that PgBouncer routes application traffic to it:
+```bash
+psql -h localhost -p 6432 -U postgres -d rpg -c "SELECT 1;"
+```
+Expected result — the target database is reachable through PgBouncer. Move to the next step.
 
 ---
 
@@ -159,6 +180,7 @@ Expected result — `rpg` database is created. Move to the next step.
 > **Canonical execution path: local Python.** All migration and parity verification commands run locally from **Terminal B: repository commands** using `python scripts/...`. Docker Compose is used only for the Web API and automated tests (Section 5). Do not mix execution paths.
 
 ### Step 1: Run Data Migration (Gate 2)
+Make sure you are in the repository root directory: `r2pg-migration`
 ```bash
 python scripts/migrate_all.py --all
 ```
@@ -210,13 +232,13 @@ Open **Swagger UI** in your browser: 👉 **[http://localhost:5000](http://local
 
 **Gate 4a pass condition:** Health endpoint returns HTTP 200:
 ```bash
-curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/health
+curl.exe -s -o /dev/null -w "%{http_code}" http://localhost:5000/health
 ```
 Expected result: `200`
 
 Quick data check:
 ```bash
-curl -s "http://localhost:5000/api/stu/student?limit=2"
+curl.exe -s "http://localhost:5000/api/stu/student?limit=2"
 ```
 
 ### Step 2: Run Automated Tests (Gate 4b)
@@ -235,7 +257,7 @@ docker compose run --rm rpg-tests
 2. In **Connection** tab:
    - **Host name/address**: `localhost`
    - **Port**: `6432`
-   - **Maintenance database**: `rpg`
+   - **Database**: `rpg`
    - **Username**: `postgres`
    - **Password**: `<your-postgres-password>`
 
@@ -278,12 +300,12 @@ docker compose down
 ### Step 2: Delete `rpg` Database (Optional / Reset)
 Run DDL directly against PostgreSQL (port `5432`) — not through PgBouncer:
 ```bash
-psql -h localhost -p 5432 -U postgres -d ctlytics_test -c "DROP DATABASE rpg WITH (FORCE);"
+psql -h localhost -p 5432 -U postgres -d postgres -c "DROP DATABASE rpg WITH (FORCE);"
 ```
 
 Verify the database has been deleted:
 ```bash
-psql -h localhost -p 5432 -U postgres -d ctlytics_test -c "SELECT datname FROM pg_database WHERE datname = 'rpg';"
+psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT datname FROM pg_database WHERE datname = 'rpg';"
 ```
 Expected output:
 ```

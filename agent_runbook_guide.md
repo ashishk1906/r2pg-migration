@@ -152,7 +152,7 @@ If Antigravity asks you to sign in, complete the browser sign-in flow. If it is 
 Paste this exact prompt into Antigravity:
 
 ```text
-From the repository root, execute `bash agent-runbook/scripts/local-onboard.sh` exactly once as the implementation of `agent_runbook.md`. Run every gate in order, stop on any failure, never print secrets, and report the final PASS/FAIL table with the failed command and non-secret error output if applicable.
+Execute agent_runbook.md end-to-end from the repository root. Run every gate in order, stop on any failure, never print secrets, and report the final PASS/FAIL table with the failed command and non-secret error output if applicable.
 ```
 
 The agent should follow `agent_runbook.md`, including the prerequisite check, PostgreSQL setup, migration, parity verification, API health check, and automated tests.

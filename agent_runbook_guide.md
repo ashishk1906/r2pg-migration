@@ -9,15 +9,21 @@ Use this guide to install Antigravity and run `agent_runbook.md`.
 Open PowerShell and run:
 
 ```powershell
-irm https://antigravity.google/install.ps1 | iex
+irm https://antigravity.google/cli/install.ps1 | iex
 ```
 
-### macOS/Linux/Git Bash/WSL
+### Windows Command Prompt (CMD)
+
+```cmd
+curl -fsSL https://antigravity.google/cli/install.cmd -o install.cmd && install.cmd && del install.cmd
+```
+
+### macOS / Linux / Git Bash / WSL
 
 Run:
 
 ```bash
-curl -fsSL https://antigravity.google/install.sh | bash
+curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
 Verify the installation:

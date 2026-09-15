@@ -37,7 +37,9 @@ Do not advance to the next gate until the current one passes.
 
 ---
 
-## 1. Clone & Prerequisites
+## 1. Terminal A: Clone & Prerequisites
+
+Run this section in **Terminal A: repository/agent commands**. Keep Terminal A open for all setup, migration, parity, API, and test commands.
 
 ### Clone Repository
 ```bash
@@ -117,7 +119,7 @@ certs/<your-client-certificate>.pfx
 ### Step 1: Start Port-Forwarding
 You need two port-forwards running simultaneously in separate terminals.
 
-**Terminal A: port-forward** — PgBouncer for app connectivity and migration scripts:
+**Terminal B: pgbouncer-forward** — PgBouncer for app connectivity and migration scripts:
 ```bash
 kubectl port-forward -n test svc/pgbouncer-svc 6432:6432
 ```
@@ -135,7 +137,7 @@ kubectl port-forward -n test svc/postgresql 5432:5432
 > Wait a few minutes and run the command again. Keep both terminals open for the entire session.
 
 ### Step 2: Verify Direct Admin Connectivity (Gate 1)
-In **Terminal B: repository commands**, confirm the direct PostgreSQL admin connection is reachable. The target database may not exist yet, so do not use PgBouncer for this initial check:
+In **Terminal A: repository commands**, confirm the direct PostgreSQL admin connection is reachable. The target database may not exist yet, so do not use PgBouncer for this initial check:
 ```bash
 # Direct PostgreSQL (admin)
 psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1;"
@@ -177,7 +179,7 @@ Expected result — the target database is reachable through PgBouncer. Move to 
 ## 4. Run Migration & Parity Verification
 
 > [!IMPORTANT]
-> **Canonical execution path: local Python.** All migration and parity verification commands run locally from **Terminal B: repository commands** using `python scripts/...`. Docker Compose is used only for the Web API and automated tests (Section 5). Do not mix execution paths.
+> **Canonical execution path: local Python.** All migration and parity verification commands run locally from **Terminal A: repository/agent commands** using `python scripts/...`. Docker Compose is used only for the Web API and automated tests (Section 5). Do not mix execution paths.
 
 ### Step 1: Run Data Migration (Gate 2)
 Make sure you are in the repository root directory: `r2pg-migration`

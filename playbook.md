@@ -16,11 +16,20 @@ You only need two things on your system:
 
 ---
 
-## 2. Configuration Setup
+## 2. Clone & Configuration Setup
 
-All configuration parameters are centralized in a single root **`.env`** file.
+### Step A: Clone Repository & Navigate
 
-### Step A: Create `.env` from Template
+In **PowerShell**, **CMD**, or **Bash**:
+
+```bash
+git clone https://github.com/ashishk1906/r2pg-migration.git
+cd r2pg-migration
+```
+
+---
+
+### Step B: Create `.env` from Template
 
 In **PowerShell** or **CMD**:
 
@@ -44,7 +53,7 @@ cp .env.example .env
 
 ---
 
-### Step B: Place RavenDB Client Certificate
+### Step C: Place RavenDB Client Certificate
 
 If connecting to RavenDB Cloud over HTTPS, download the client certificate from the shared Google Drive:
 

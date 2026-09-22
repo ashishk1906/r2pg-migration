@@ -19,6 +19,9 @@ MODULE_SCRIPTS = [
     ("students", "students_ravendb_to_postgres_migrate.py"),
     ("fees", "fees_ravendb_to_postgres_migrate.py"),
     ("exams", "exams_ravendb_to_postgres_migrate.py"),
+    ("applications", "applications_ravendb_to_postgres_migrate.py"),
+    ("assets", "assets_ravendb_to_postgres_migrate.py"),
+    ("attendance_events", "attendance_events_ravendb_to_postgres_migrate.py"),
 ]
 
 def load_env_file(env_path: Path):
@@ -113,7 +116,16 @@ def main():
         selected_modules = [m[0] for m in MODULE_SCRIPTS]
     else:
         raw_modules = [m.strip().lower() for m in args.module.split(",")]
-        selected_modules = ["students" if m == "student" else m for m in raw_modules]
+        selected_modules = [
+            "students" if m == "student" else (
+                "applications" if m in ("application", "admission", "admissions") else (
+                    "assets" if m in ("asset", "assetview", "assetviews") else (
+                        "attendance_events" if m in ("attendance", "attendanceevent", "attendanceevents", "attendance_event") else m
+                    )
+                )
+            )
+            for m in raw_modules
+        ]
 
     print(f"[*] Queued migration modules: {', '.join(selected_modules)}")
     

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract Gradings data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONB,
+Extract MemberViews data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL types and JSONB,
 and load into PostgreSQL.
 
 Target table:
-- gradings
+- member_views
 """
 
 from __future__ import annotations
@@ -29,17 +29,7 @@ UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
-UUID_NAMESPACE_GRADINGS = uuid.UUID("6ba7b817-9dad-11d1-80b4-00c04fd430c8")
-
-GRADING_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "disabled": "Disabled",
-    "inactive": "Disabled",
-}
+UUID_NAMESPACE_MEMBER_VIEWS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 
 # -----------------------------------------------------------------------------
@@ -59,7 +49,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    gradings_collection: str
+    member_views_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -103,7 +93,7 @@ def parse_args() -> Config:
         load_env_file(root_env)
 
     parser = argparse.ArgumentParser(
-        description="Migrate Gradings from RavenDB to PostgreSQL"
+        description="Migrate MemberViews from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -124,9 +114,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--gradings-collection",
-        default=os.getenv("GRADINGS_COLLECTION", "Gradings"),
-        help="RavenDB collection name for gradings (default: Gradings)",
+        "--member-views-collection",
+        default=os.getenv("MEMBER_VIEWS_COLLECTION", "MemberViews"),
+        help="RavenDB collection name for member views (default: MemberViews)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -193,7 +183,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        gradings_collection=args.gradings_collection,
+        member_views_collection=args.member_views_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -221,6 +211,15 @@ def clean_uuid(val: Any) -> Optional[str]:
     return match.group(0).lower() if match else None
 
 
+def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    return s[:max_len] if max_len else s
+
+
 def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
@@ -228,99 +227,37 @@ def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     return Json(value)
 
 
-def parse_iso_timestamp(val: Any) -> Optional[datetime]:
-    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
-    if not val:
-        return None
-    text = str(val).strip()
-    if not text:
-        return None
-
-    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
-    if "." in normalized:
-        base, frac = normalized.split(".", 1)
-        tz_pos = max(frac.find("+"), frac.find("-"))
-        if tz_pos >= 0:
-            frac_part = frac[:tz_pos]
-            tz_part = frac[tz_pos:]
-        else:
-            frac_part = frac
-            tz_part = ""
-        digits = "".join(ch for ch in frac_part if ch.isdigit())[:6]
-        normalized = f"{base}.{digits}{tz_part}" if digits else f"{base}{tz_part}"
-    if "+" not in normalized[10:] and "-" not in normalized[10:]:
-        normalized = f"{normalized}+00:00"
-
-    try:
-        dt = datetime.fromisoformat(normalized)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-def map_grading_status(val: Any) -> str:
-    """Map status string/int to grading_status_enum."""
-    if val is None:
-        return "Active"
-    if isinstance(val, int):
-        return GRADING_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return GRADING_STATUS_MAP.get(int(s), "Active")
-    return GRADING_STATUS_MAP.get(s.lower(), "Active")
-
-
 # -----------------------------------------------------------------------------
 # Document Field Extractor (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_grading_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for gradings table."""
+def extract_member_view_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for member_views table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    grading_id = None
-    if raw_id:
-        clean_raw = str(raw_id).strip()
-        last_part = clean_raw.rsplit("/", 1)[-1]
-        if UUID_RE.fullmatch(last_part):
-            grading_id = last_part.lower()
-        elif UUID_RE.fullmatch(clean_raw):
-            grading_id = clean_raw.lower()
-        else:
-            grading_id = str(
-                uuid.uuid5(UUID_NAMESPACE_GRADINGS, clean_raw)
-            ).lower()
-    if not grading_id:
-        raise ValueError(f"Grading missing valid ID: {raw_id}")
-
-    status = map_grading_status(doc.get("Status"))
-    raw_rules = doc.get("GradingRules") or doc.get("Rules")
-    grading_rules = as_json(
-        raw_rules if isinstance(raw_rules, list) else [], default_val=[]
-    )
+    member_view_id = clean_uuid(raw_id)
+    if not member_view_id and raw_id:
+        member_view_id = str(
+            uuid.uuid5(UUID_NAMESPACE_MEMBER_VIEWS, str(raw_id).strip())
+        ).lower()
+    if not member_view_id:
+        raise ValueError(f"MemberView missing valid ID: {raw_id}")
 
     owner_id = clean_uuid(doc.get("OwnerId"))
-    parent_id = clean_uuid(doc.get("ParentId"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
-    created_by = clean_uuid(doc.get("CreatedBy"))
-    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
-    modified_by = clean_uuid(doc.get("ModifiedBy"))
+    membership_id = clean_str(doc.get("MembershipId"), 100)
+    member_type = clean_str(doc.get("MemberType"), 50)
+    issued_books = as_json(
+        doc.get("IssuedBooks") if isinstance(doc.get("IssuedBooks"), list) else [],
+        default_val=[],
+    )
 
     return (
-        grading_id,
-        status,
-        grading_rules,
+        member_view_id,
         owner_id,
-        parent_id,
-        created_on,
-        created_by,
-        modified_on,
-        modified_by,
+        membership_id,
+        member_type,
+        issued_books,
     )
 
 
@@ -330,30 +267,15 @@ def extract_grading_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and gradings table without secondary indexes or views."""
+    """Create target member_views table without secondary indexes or views."""
     cur.execute(
         """
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'grading_status_enum') THEN
-                CREATE TYPE grading_status_enum AS ENUM (
-                    'Unknown',
-                    'Active',
-                    'Disabled'
-                );
-            END IF;
-        END $$;
-
-        CREATE TABLE IF NOT EXISTS gradings (
+        CREATE TABLE IF NOT EXISTS member_views (
             id UUID PRIMARY KEY,
-            status grading_status_enum NOT NULL DEFAULT 'Active',
-            grading_rules JSONB DEFAULT '[]'::jsonb,
             owner_id UUID,
-            parent_id UUID,
-            created_on TIMESTAMPTZ,
-            created_by UUID,
-            modified_on TIMESTAMPTZ,
-            modified_by UUID
+            membership_id VARCHAR(100),
+            member_type VARCHAR(50),
+            issued_books JSONB DEFAULT '[]'::jsonb
         );
         """
     )
@@ -364,34 +286,26 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_grading(
+def upsert_member_view(
     cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
 ) -> UpsertResult:
-    """Idempotently upsert a Grading document."""
-    fields = extract_grading_fields(doc)
+    """Idempotently upsert a MemberView document."""
+    fields = extract_member_view_fields(doc)
     sql = """
-        INSERT INTO gradings (
+        INSERT INTO member_views (
             id,
-            status,
-            grading_rules,
             owner_id,
-            parent_id,
-            created_on,
-            created_by,
-            modified_on,
-            modified_by
+            membership_id,
+            member_type,
+            issued_books
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            status = EXCLUDED.status,
-            grading_rules = EXCLUDED.grading_rules,
             owner_id = EXCLUDED.owner_id,
-            parent_id = EXCLUDED.parent_id,
-            created_on = EXCLUDED.created_on,
-            created_by = EXCLUDED.created_by,
-            modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by
+            membership_id = EXCLUDED.membership_id,
+            member_type = EXCLUDED.member_type,
+            issued_books = EXCLUDED.issued_books
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -469,7 +383,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for Gradings."""
+    """Run the end-to-end migration for MemberViews."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -479,24 +393,26 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.gradings_collection}"
+            f"collection={cfg.member_views_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        grading_docs = raven_query_collection(
-            requests_session, cfg, cfg.gradings_collection
+        member_docs = raven_query_collection(
+            requests_session, cfg, cfg.member_views_collection
         )
 
         # Fallback to singular name if 0 docs fetched with default collection name
-        if not grading_docs and cfg.gradings_collection == "Gradings":
+        if not member_docs and cfg.member_views_collection == "MemberViews":
             try:
-                alt_docs = raven_query_collection(requests_session, cfg, "Grading")
+                alt_docs = raven_query_collection(
+                    requests_session, cfg, "MemberView"
+                )
                 if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'Grading'.")
-                    grading_docs = alt_docs
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'MemberView'.")
+                    member_docs = alt_docs
             except Exception:
                 pass
 
-        print(f"Fetched gradings={len(grading_docs)}")
+        print(f"Fetched member_views={len(member_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -515,19 +431,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_gradings = 0
-        new_gradings = 0
+        loaded_views = 0
+        new_views = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting gradings...")
-                for d in grading_docs:
-                    res = upsert_grading(cur, d)
-                    loaded_gradings += 1
-                    new_gradings += int(res.inserted)
+                print("[4/4] Upserting member views...")
+                for d in member_docs:
+                    res = upsert_member_view(cur, d)
+                    loaded_views += 1
+                    new_views += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -536,7 +452,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.gradings_collection,
+                "collection": cfg.member_views_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -545,14 +461,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "gradings_processed": loaded_gradings,
-                "new_gradings_inserted": new_gradings,
+                "member_views_processed": loaded_views,
+                "new_member_views_inserted": new_views,
             },
         }
 
         print("Migration completed.")
-        print(f"gradings_processed: {loaded_gradings}")
-        print(f"new_gradings_inserted: {new_gradings}")
+        print(f"member_views_processed: {loaded_views}")
+        print(f"new_member_views_inserted: {new_views}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

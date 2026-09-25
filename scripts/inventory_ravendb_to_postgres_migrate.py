@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Extract Artefacts and ArtefactTags data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
-and load into local PostgreSQL.
+Extract InventoryItemViews and InventoryJournalViews data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONB,
+and load into PostgreSQL.
 
 Target tables:
-- artefact_tags
-- artefacts
+- inventory_item_views
+- inventory_journal_views
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import json
@@ -19,8 +20,8 @@ import os
 from pathlib import Path
 import re
 import sys
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 import psycopg2
 from psycopg2.extras import Json
@@ -29,6 +30,34 @@ import requests
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
+
+UUID_NAMESPACE_INVENTORY_ITEMS = uuid.UUID("6ba7b813-9dad-11d1-80b4-00c04fd430c8")
+UUID_NAMESPACE_INVENTORY_JOURNALS = uuid.UUID("6ba7b814-9dad-11d1-80b4-00c04fd430c8")
+
+INVENTORY_STATUS_MAP: Dict[Any, str] = {
+    "active": "Active",
+    "disabled": "Disabled",
+    "archived": "Archived",
+    "unknown": "Unknown",
+    "1": "Active",
+    "99": "Disabled",
+    1: "Active",
+    99: "Disabled",
+}
+
+INVENTORY_TYPE_MAP: Dict[str, str] = {
+    "item": "Item",
+    "group": "Group",
+    "unknown": "Unknown",
+}
+
+JOURNAL_ENTRY_TYPE_MAP: Dict[str, str] = {
+    "cr": "Cr",
+    "credit": "Cr",
+    "dr": "Dr",
+    "debit": "Dr",
+    "unknown": "Unknown",
+}
 
 
 # -----------------------------------------------------------------------------
@@ -48,8 +77,8 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    artefacts_collection: str
-    tags_collection: str
+    inventory_item_views_collection: str
+    inventory_journal_views_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -93,7 +122,7 @@ def parse_args() -> Config:
         load_env_file(root_env)
 
     parser = argparse.ArgumentParser(
-        description="Migrate Artefacts and ArtefactTags from RavenDB to PostgreSQL"
+        description="Migrate Inventory data from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -114,12 +143,14 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--artefacts-collection",
-        default=os.getenv("ARTEFACTS_COLLECTION", "Artefacts"),
+        "--inventory-item-views-collection",
+        default=os.getenv("INVENTORY_ITEM_VIEWS_COLLECTION", "InventoryItemViews"),
+        help="RavenDB collection name for inventory item views (default: InventoryItemViews)",
     )
     parser.add_argument(
-        "--tags-collection",
-        default=os.getenv("ARTEFACT_TAGS_COLLECTION", "ArtefactTags"),
+        "--inventory-journal-views-collection",
+        default=os.getenv("INVENTORY_JOURNAL_VIEWS_COLLECTION", "InventoryJournalViews"),
+        help="RavenDB collection name for inventory journal views (default: InventoryJournalViews)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -186,8 +217,8 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        artefacts_collection=args.artefacts_collection,
-        tags_collection=args.tags_collection,
+        inventory_item_views_collection=args.inventory_item_views_collection,
+        inventory_journal_views_collection=args.inventory_journal_views_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -224,21 +255,26 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any) -> bool:
+def clean_decimal(
+    val: Any, default: Optional[Decimal] = Decimal("0.00")
+) -> Optional[Decimal]:
     if val is None:
-        return False
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() in {"true", "1", "yes"}
-
-
-def clean_decimal(val: Any) -> Optional[Decimal]:
-    if val is None:
-        return None
+        return default
     try:
         return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.01"))
     except (InvalidOperation, ValueError, TypeError):
-        return None
+        return default
+
+
+def clean_quantity(
+    val: Any, default: Optional[Decimal] = Decimal("0.0000")
+) -> Optional[Decimal]:
+    if val is None:
+        return default
+    try:
+        return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.0001"))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
 
 
 def clean_string_list(raw_val: Any) -> List[str]:
@@ -253,15 +289,15 @@ def clean_string_list(raw_val: Any) -> List[str]:
     return [str(raw_val)]
 
 
-def as_json(value: Any) -> Optional[Json]:
+def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return None
+        return Json(default_val) if default_val is not None else None
     return Json(value)
 
 
 def parse_iso_timestamp(val: Any) -> Optional[datetime]:
-    """Parse ISO timestamp safely."""
+    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
     if not val:
         return None
     text = str(val).strip()
@@ -292,262 +328,188 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-# -----------------------------------------------------------------------------
-# Enum Mappings (Exact match to C# Enums)
-# -----------------------------------------------------------------------------
-
-# TagStatusEnum: Unknown = 0, Active = 1, Disabled = 99
-TAG_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "disabled": "Disabled",
-}
-
-
-def map_tag_status(val: Any) -> str:
-    if val is None:
+def map_inventory_status(raw_val: Any) -> str:
+    """Map status string/int to inventory_status_enum."""
+    if raw_val is None:
         return "Active"
-    if isinstance(val, int):
-        return TAG_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return TAG_STATUS_MAP.get(int(s), "Active")
-    return TAG_STATUS_MAP.get(s.lower(), "Active")
+    if isinstance(raw_val, int):
+        return INVENTORY_STATUS_MAP.get(raw_val, "Active")
+    norm = str(raw_val).strip().lower()
+    return INVENTORY_STATUS_MAP.get(norm, "Active")
 
 
-# ArtefactStatusEnum: Unknown=0, Active=1, Etl=60, Published=70, PublishedToPublic=75, Uploaded=80, Downloaded=90, Disabled=99
-ARTEFACT_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    60: "Etl",
-    70: "Published",
-    75: "PublishedToPublic",
-    80: "Uploaded",
-    90: "Downloaded",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "etl": "Etl",
-    "published": "Published",
-    "publishedtopublic": "PublishedToPublic",
-    "published_to_public": "PublishedToPublic",
-    "uploaded": "Uploaded",
-    "downloaded": "Downloaded",
-    "disabled": "Disabled",
-}
+def map_inventory_type(raw_val: Any) -> str:
+    """Map inventory type string to inventory_type_enum."""
+    if raw_val is None:
+        return "Item"
+    norm = str(raw_val).strip().lower()
+    return INVENTORY_TYPE_MAP.get(norm, "Item")
 
 
-def map_artefact_status(val: Any) -> str:
-    if val is None:
-        return "Active"
-    if isinstance(val, int):
-        return ARTEFACT_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return ARTEFACT_STATUS_MAP.get(int(s), "Active")
-    norm = s.lower().replace(" ", "").replace("_", "")
-    return ARTEFACT_STATUS_MAP.get(norm, "Active")
+def map_journal_entry_type(raw_val: Any) -> str:
+    """Map journal entry type string to journal_entry_type_enum."""
+    if raw_val is None:
+        return "Cr"
+    norm = str(raw_val).strip().lower()
+    return JOURNAL_ENTRY_TYPE_MAP.get(norm, "Cr")
 
 
 # -----------------------------------------------------------------------------
-# Document Field Extractors
+# Document Field Extractors (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform all fields for artefact_tags table."""
+def extract_inventory_item_view_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for inventory_item_views table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    tag_id = clean_uuid(raw_id)
-    if not tag_id:
-        raise ValueError(f"ArtefactTag missing valid UUID: {raw_id}")
+    item_id = clean_uuid(raw_id)
+    if not item_id and raw_id:
+        item_id = str(
+            uuid.uuid5(UUID_NAMESPACE_INVENTORY_ITEMS, str(raw_id).strip())
+        ).lower()
+    if not item_id:
+        raise ValueError(f"InventoryItemView missing valid ID: {raw_id}")
 
-    name = clean_str(doc.get("Name"), 150)
-    predefined = clean_bool(doc.get("Predefined"))
-    csn = clean_str(doc.get("CSN"), 100)
-    meta = as_json(doc.get("Meta") or {})
-    status = map_tag_status(doc.get("Status"))
-
+    name = clean_str(doc.get("Name"), 255)
+    group_id = clean_uuid(doc.get("GroupId"))
+    inventory_type = map_inventory_type(doc.get("InventoryType"))
+    uom = clean_str(doc.get("UOM"), 50)
     owner_id = clean_uuid(doc.get("OwnerId"))
-    parent_id = clean_uuid(doc.get("ParentId"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
-    created_by = clean_uuid(doc.get("CreatedBy"))
-    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
-    modified_by = clean_uuid(doc.get("ModifiedBy"))
-
-    return (
-        tag_id,
-        name,
-        predefined,
-        csn,
-        meta,
-        status,
-        owner_id,
-        parent_id,
-        created_on,
-        created_by,
-        modified_on,
-        modified_by,
-    )
-
-
-def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform all fields for artefacts table using JSONBs and TEXT[]."""
-    metadata = doc.get("@metadata") or {}
-    raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    art_id = clean_uuid(raw_id)
-    if not art_id:
-        raise ValueError(f"Artefact missing valid UUID: {raw_id}")
-
-    url = clean_str(doc.get("Url"))
-    title = clean_str(doc.get("Title"), 250)
-    description = clean_str(doc.get("Description"))
-    meta_data = as_json(doc.get("MetaData") or {})
-
     tags = clean_string_list(doc.get("Tags"))
-
-    mime_type = clean_str(doc.get("MimeType"), 100)
-    file_name = clean_str(doc.get("FileName"), 250)
-    file_size = clean_decimal(doc.get("FileSize"))
-    status = map_artefact_status(doc.get("Status"))
-    sha1 = clean_str(doc.get("SHA1"), 100)
-
-    model = clean_str(doc.get("Model"))
-    template = clean_str(doc.get("Template"))
-    csv_val = clean_str(doc.get("Csv"))
-
-    change_set = as_json(doc.get("ChangeSet") if isinstance(doc.get("ChangeSet"), list) else [])
-    comments = as_json(doc.get("Comments") if isinstance(doc.get("Comments"), list) else [])
-    video_links = as_json(doc.get("VideoLinks") if isinstance(doc.get("VideoLinks"), list) else [])
-    data_attributes = as_json(doc.get("DataAttributes") if isinstance(doc.get("DataAttributes"), list) else [])
-
-    published_on = parse_iso_timestamp(doc.get("PublishedOn"))
-    public_urls = clean_string_list(doc.get("PublicUrls"))
-    thumbnails = clean_string_list(doc.get("Thumbnails"))
-
-    owner_id = clean_uuid(doc.get("OwnerId"))
-    parent_id = clean_uuid(doc.get("ParentId"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
-    created_by = clean_uuid(doc.get("CreatedBy"))
-    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
-    modified_by = clean_uuid(doc.get("ModifiedBy"))
+    attributes = as_json(
+        doc.get("Attributes") if isinstance(doc.get("Attributes"), dict) else {},
+        default_val={},
+    )
+    status = map_inventory_status(doc.get("Status"))
 
     return (
-        art_id,
-        url,
-        title,
-        description,
-        meta_data,
-        tags,
-        mime_type,
-        file_name,
-        file_size,
-        status,
-        sha1,
-        model,
-        template,
-        csv_val,
-        change_set,
-        comments,
-        video_links,
-        data_attributes,
-        published_on,
-        public_urls,
-        thumbnails,
+        item_id,
+        name,
+        group_id,
+        inventory_type,
+        uom,
         owner_id,
-        parent_id,
-        created_on,
-        created_by,
-        modified_on,
-        modified_by,
+        tags,
+        attributes,
+        status,
+    )
+
+
+def extract_inventory_journal_view_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for inventory_journal_views table."""
+    metadata = doc.get("@metadata") or {}
+    raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
+    journal_id = clean_uuid(raw_id)
+    if not journal_id and raw_id:
+        journal_id = str(
+            uuid.uuid5(UUID_NAMESPACE_INVENTORY_JOURNALS, str(raw_id).strip())
+        ).lower()
+    if not journal_id:
+        raise ValueError(f"InventoryJournalView missing valid ID: {raw_id}")
+
+    owner_id = clean_uuid(doc.get("OwnerId"))
+    inventory_item_id = clean_uuid(doc.get("InventoryItemId"))
+    name = clean_str(doc.get("Name"), 255)
+    date_val = parse_iso_timestamp(doc.get("Date"))
+    uom = clean_str(doc.get("UOM"), 50)
+    quantity = clean_quantity(doc.get("Quantity"), default=Decimal("0.0000"))
+    rate = clean_decimal(doc.get("Rate"), default=Decimal("0.00"))
+    particulars = clean_str(doc.get("Particulars"))
+    reference = clean_str(doc.get("Reference"), 255)
+    inventory_journal_id = clean_uuid(doc.get("InventoryJournalId"))
+    accounting_journal_id = clean_uuid(doc.get("AccountingJournalId"))
+    party_id = clean_uuid(doc.get("PartyId"))
+    party_name = clean_str(doc.get("PartyName"), 255)
+    journal_entry_type = map_journal_entry_type(doc.get("JournalEntryType"))
+    status = map_inventory_status(doc.get("Status"))
+
+    return (
+        journal_id,
+        owner_id,
+        inventory_item_id,
+        name,
+        date_val,
+        uom,
+        quantity,
+        rate,
+        particulars,
+        reference,
+        inventory_journal_id,
+        accounting_journal_id,
+        party_id,
+        party_name,
+        journal_entry_type,
+        status,
     )
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes, no views)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums, artefact_tags and artefacts tables."""
+    """Create target enums and inventory tables without secondary indexes or views."""
     cur.execute(
         """
-        -- 1. Create Enums
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tag_status_enum') THEN
-                CREATE TYPE tag_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'inventory_status_enum') THEN
+                CREATE TYPE inventory_status_enum AS ENUM (
                     'Unknown',
                     'Active',
-                    'Disabled'
+                    'Disabled',
+                    'Archived'
                 );
             END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'artefact_status_enum') THEN
-                CREATE TYPE artefact_status_enum AS ENUM (
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'inventory_type_enum') THEN
+                CREATE TYPE inventory_type_enum AS ENUM (
                     'Unknown',
-                    'Active',
-                    'Etl',
-                    'Published',
-                    'PublishedToPublic',
-                    'Uploaded',
-                    'Downloaded',
-                    'Disabled'
+                    'Item',
+                    'Group'
+                );
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'journal_entry_type_enum') THEN
+                CREATE TYPE journal_entry_type_enum AS ENUM (
+                    'Unknown',
+                    'Cr',
+                    'Dr'
                 );
             END IF;
         END $$;
 
-        -- 2. ArtefactTags Table
-        CREATE TABLE IF NOT EXISTS artefact_tags (
+        CREATE TABLE IF NOT EXISTS inventory_item_views (
             id UUID PRIMARY KEY,
-            name VARCHAR(150),
-            predefined BOOLEAN DEFAULT FALSE,
-            csn VARCHAR(100),
-            meta JSONB DEFAULT '{}'::jsonb,
-            status tag_status_enum NOT NULL DEFAULT 'Active',
+            name VARCHAR(255),
+            group_id UUID,
+            inventory_type inventory_type_enum NOT NULL DEFAULT 'Item',
+            uom VARCHAR(50),
             owner_id UUID,
-            parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
-            created_by UUID,
-            modified_on TIMESTAMPTZ,
-            modified_by UUID
+            tags TEXT[] DEFAULT '{}'::text[],
+            attributes JSONB DEFAULT '{}'::jsonb,
+            status inventory_status_enum NOT NULL DEFAULT 'Active'
         );
 
-        -- 3. Artefacts Table
-        CREATE TABLE IF NOT EXISTS artefacts (
+        CREATE TABLE IF NOT EXISTS inventory_journal_views (
             id UUID PRIMARY KEY,
-            url TEXT,
-            title VARCHAR(250),
-            description TEXT,
-            meta_data JSONB DEFAULT '{}'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            mime_type VARCHAR(100),
-            file_name VARCHAR(250),
-            file_size NUMERIC(18, 2),
-            status artefact_status_enum NOT NULL DEFAULT 'Active',
-            sha1 VARCHAR(100),
-            model TEXT,
-            template TEXT,
-            csv TEXT,
-            change_set JSONB DEFAULT '[]'::jsonb,
-            comments JSONB DEFAULT '[]'::jsonb,
-            video_links JSONB DEFAULT '[]'::jsonb,
-            data_attributes JSONB DEFAULT '[]'::jsonb,
-            published_on TIMESTAMPTZ,
-            public_urls TEXT[] DEFAULT '{}'::text[],
-            thumbnails TEXT[] DEFAULT '{}'::text[],
             owner_id UUID,
-            parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
-            created_by UUID,
-            modified_on TIMESTAMPTZ,
-            modified_by UUID
+            inventory_item_id UUID,
+            name VARCHAR(255),
+            date TIMESTAMPTZ,
+            uom VARCHAR(50),
+            quantity NUMERIC(18, 4) DEFAULT 0.0000,
+            rate NUMERIC(18, 2) DEFAULT 0.00,
+            particulars TEXT,
+            reference VARCHAR(255),
+            inventory_journal_id UUID,
+            accounting_journal_id UUID,
+            party_id UUID,
+            party_name VARCHAR(255),
+            journal_entry_type journal_entry_type_enum NOT NULL DEFAULT 'Cr',
+            status inventory_status_enum NOT NULL DEFAULT 'Active'
         );
         """
     )
@@ -558,29 +520,34 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_tag(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert an ArtefactTag."""
-    fields = extract_tag_fields(doc)
+def upsert_inventory_item_view(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert an InventoryItemView document."""
+    fields = extract_inventory_item_view_fields(doc)
     sql = """
-        INSERT INTO artefact_tags (
-            id, name, predefined, csn, meta, status,
-            owner_id, parent_id, created_on, created_by, modified_on, modified_by
+        INSERT INTO inventory_item_views (
+            id,
+            name,
+            group_id,
+            inventory_type,
+            uom,
+            owner_id,
+            tags,
+            attributes,
+            status
         ) VALUES (
-            %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
             name = EXCLUDED.name,
-            predefined = EXCLUDED.predefined,
-            csn = EXCLUDED.csn,
-            meta = EXCLUDED.meta,
-            status = EXCLUDED.status,
+            group_id = EXCLUDED.group_id,
+            inventory_type = EXCLUDED.inventory_type,
+            uom = EXCLUDED.uom,
             owner_id = EXCLUDED.owner_id,
-            parent_id = EXCLUDED.parent_id,
-            created_on = EXCLUDED.created_on,
-            created_by = EXCLUDED.created_by,
-            modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by
+            tags = EXCLUDED.tags,
+            attributes = EXCLUDED.attributes,
+            status = EXCLUDED.status
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -589,48 +556,48 @@ def upsert_tag(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertRe
     return UpsertResult(record_id=fields[0], inserted=inserted)
 
 
-def upsert_artefact(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert an Artefact."""
-    fields = extract_artefact_fields(doc)
+def upsert_inventory_journal_view(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert an InventoryJournalView document."""
+    fields = extract_inventory_journal_view_fields(doc)
     sql = """
-        INSERT INTO artefacts (
-            id, url, title, description, meta_data, tags, mime_type, file_name, file_size,
-            status, sha1, model, template, csv, change_set, comments, video_links,
-            data_attributes, published_on, public_urls, thumbnails,
-            owner_id, parent_id, created_on, created_by, modified_on, modified_by
+        INSERT INTO inventory_journal_views (
+            id,
+            owner_id,
+            inventory_item_id,
+            name,
+            date,
+            uom,
+            quantity,
+            rate,
+            particulars,
+            reference,
+            inventory_journal_id,
+            accounting_journal_id,
+            party_id,
+            party_name,
+            journal_entry_type,
+            status
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            url = EXCLUDED.url,
-            title = EXCLUDED.title,
-            description = EXCLUDED.description,
-            meta_data = EXCLUDED.meta_data,
-            tags = EXCLUDED.tags,
-            mime_type = EXCLUDED.mime_type,
-            file_name = EXCLUDED.file_name,
-            file_size = EXCLUDED.file_size,
-            status = EXCLUDED.status,
-            sha1 = EXCLUDED.sha1,
-            model = EXCLUDED.model,
-            template = EXCLUDED.template,
-            csv = EXCLUDED.csv,
-            change_set = EXCLUDED.change_set,
-            comments = EXCLUDED.comments,
-            video_links = EXCLUDED.video_links,
-            data_attributes = EXCLUDED.data_attributes,
-            published_on = EXCLUDED.published_on,
-            public_urls = EXCLUDED.public_urls,
-            thumbnails = EXCLUDED.thumbnails,
             owner_id = EXCLUDED.owner_id,
-            parent_id = EXCLUDED.parent_id,
-            created_on = EXCLUDED.created_on,
-            created_by = EXCLUDED.created_by,
-            modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by
+            inventory_item_id = EXCLUDED.inventory_item_id,
+            name = EXCLUDED.name,
+            date = EXCLUDED.date,
+            uom = EXCLUDED.uom,
+            quantity = EXCLUDED.quantity,
+            rate = EXCLUDED.rate,
+            particulars = EXCLUDED.particulars,
+            reference = EXCLUDED.reference,
+            inventory_journal_id = EXCLUDED.inventory_journal_id,
+            accounting_journal_id = EXCLUDED.accounting_journal_id,
+            party_id = EXCLUDED.party_id,
+            party_name = EXCLUDED.party_name,
+            journal_entry_type = EXCLUDED.journal_entry_type,
+            status = EXCLUDED.status
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -708,7 +675,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for artefact tags and artefacts."""
+    """Run the end-to-end migration for Inventory tables."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -717,21 +684,38 @@ def main() -> int:
         configure_raven_session(requests_session, cfg)
 
         print(
-            f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collections=({cfg.tags_collection}, {cfg.artefacts_collection})"
+            f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}\n"
+            f"  - items collection: {cfg.inventory_item_views_collection}\n"
+            f"  - journals collection: {cfg.inventory_journal_views_collection}"
         )
-        print("[1/5] Fetching RavenDB documents...")
-        tag_docs = raven_query_collection(
-            requests_session, cfg, cfg.tags_collection
+        print("[1/4] Fetching RavenDB documents...")
+        item_docs = raven_query_collection(
+            requests_session, cfg, cfg.inventory_item_views_collection
         )
-        art_docs = raven_query_collection(
-            requests_session, cfg, cfg.artefacts_collection
-        )
-        print(
-            f"Fetched artefact_tags={len(tag_docs)}, artefacts={len(art_docs)}"
-        )
+        if not item_docs and cfg.inventory_item_views_collection == "InventoryItemViews":
+            try:
+                alt_docs = raven_query_collection(requests_session, cfg, "InventoryItemView")
+                if alt_docs:
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'InventoryItemView'.")
+                    item_docs = alt_docs
+            except Exception:
+                pass
 
-        print("[2/5] Connecting PostgreSQL...")
+        journal_docs = raven_query_collection(
+            requests_session, cfg, cfg.inventory_journal_views_collection
+        )
+        if not journal_docs and cfg.inventory_journal_views_collection == "InventoryJournalViews":
+            try:
+                alt_docs = raven_query_collection(requests_session, cfg, "InventoryJournalView")
+                if alt_docs:
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'InventoryJournalView'.")
+                    journal_docs = alt_docs
+            except Exception:
+                pass
+
+        print(f"Fetched inventory_items={len(item_docs)}, inventory_journals={len(journal_docs)}")
+
+        print("[2/4] Connecting PostgreSQL...")
         print(
             f"PostgreSQL target: host={cfg.pg_host}, port={cfg.pg_port}, "
             f"db={cfg.pg_db}, user={cfg.pg_user}"
@@ -748,34 +732,27 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_tags = 0
-        new_tags = 0
-        loaded_arts = 0
-        new_arts = 0
+        loaded_items = 0
+        new_items = 0
+        loaded_journals = 0
+        new_journals = 0
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/5] Ensuring target schema...")
+                print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/5] Upserting artefact tags...")
-                for d in tag_docs:
-                    res = upsert_tag(cur, d)
-                    loaded_tags += 1
-                    new_tags += int(res.inserted)
+                print("[4/4] Upserting inventory items...")
+                for d in item_docs:
+                    res = upsert_inventory_item_view(cur, d)
+                    loaded_items += 1
+                    new_items += int(res.inserted)
 
-                print("[5/5] Upserting artefacts...")
-                for d in art_docs:
-                    res = upsert_artefact(cur, d)
-                    loaded_arts += 1
-                    new_arts += int(res.inserted)
-
-        # Post-load verification counts
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM artefact_tags")
-            total_tags = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM artefacts")
-            total_artefacts = int(cur.fetchone()[0])
+                print("[4/4] Upserting inventory journals...")
+                for d in journal_docs:
+                    res = upsert_inventory_journal_view(cur, d)
+                    loaded_journals += 1
+                    new_journals += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -784,8 +761,10 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "tags_collection": cfg.tags_collection,
-                "artefacts_collection": cfg.artefacts_collection,
+                "collections": [
+                    cfg.inventory_item_views_collection,
+                    cfg.inventory_journal_views_collection,
+                ],
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -794,22 +773,16 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "tags_processed": loaded_tags,
-                "new_tags_inserted": new_tags,
-                "artefacts_processed": loaded_arts,
-                "new_artefacts_inserted": new_arts,
-            },
-            "post_load_counts": {
-                "artefact_tags": total_tags,
-                "artefacts": total_artefacts,
+                "inventory_item_views_processed": loaded_items,
+                "new_inventory_item_views_inserted": new_items,
+                "inventory_journal_views_processed": loaded_journals,
+                "new_inventory_journal_views_inserted": new_journals,
             },
         }
 
         print("Migration completed.")
-        print(f"artefacts_tags_processed: {loaded_tags}")
-        print(f"new_artefacts_tags_inserted: {new_tags}")
-        print(f"artefacts_processed: {loaded_arts}")
-        print(f"new_artefacts_inserted: {new_arts}")
+        print(f"inventory_item_views_processed: {loaded_items} (new: {new_items})")
+        print(f"inventory_journal_views_processed: {loaded_journals} (new: {new_journals})")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

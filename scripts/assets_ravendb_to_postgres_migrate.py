@@ -242,7 +242,7 @@ def parse_ts(value: Any) -> Optional[str]:
     if value is None:
         return None
     text = str(value).strip()
-    if not text or text.startswith("0001-01-01"):
+    if not text:
         return None
 
     normalized = text[:-1] + "+00:00" if text.endswith("Z") else text

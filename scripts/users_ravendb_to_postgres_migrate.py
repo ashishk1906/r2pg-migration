@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 """
-Extract Artefacts and ArtefactTags data from RavenDB,
+Extract Users data from RavenDB,
 transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
-and load into local PostgreSQL.
+and load into PostgreSQL.
 
-Target tables:
-- artefact_tags
-- artefacts
+Target table:
+- users
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
 import re
 import sys
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -48,8 +46,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    artefacts_collection: str
-    tags_collection: str
+    users_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -93,7 +90,7 @@ def parse_args() -> Config:
         load_env_file(root_env)
 
     parser = argparse.ArgumentParser(
-        description="Migrate Artefacts and ArtefactTags from RavenDB to PostgreSQL"
+        description="Migrate Users from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -114,12 +111,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--artefacts-collection",
-        default=os.getenv("ARTEFACTS_COLLECTION", "Artefacts"),
-    )
-    parser.add_argument(
-        "--tags-collection",
-        default=os.getenv("ARTEFACT_TAGS_COLLECTION", "ArtefactTags"),
+        "--users-collection",
+        default=os.getenv("USERS_COLLECTION", "Users"),
+        help="RavenDB collection name for users (default: Users)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -186,8 +180,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        artefacts_collection=args.artefacts_collection,
-        tags_collection=args.tags_collection,
+        users_collection=args.users_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -224,21 +217,12 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any) -> bool:
+def clean_bool(val: Any, default: bool = False) -> bool:
     if val is None:
-        return False
+        return default
     if isinstance(val, bool):
         return val
     return str(val).strip().lower() in {"true", "1", "yes"}
-
-
-def clean_decimal(val: Any) -> Optional[Decimal]:
-    if val is None:
-        return None
-    try:
-        return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.01"))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
 
 
 def clean_string_list(raw_val: Any) -> List[str]:
@@ -253,15 +237,15 @@ def clean_string_list(raw_val: Any) -> List[str]:
     return [str(raw_val)]
 
 
-def as_json(value: Any) -> Optional[Json]:
+def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return None
+        return Json(default_val) if default_val is not None else None
     return Json(value)
 
 
 def parse_iso_timestamp(val: Any) -> Optional[datetime]:
-    """Parse ISO timestamp safely."""
+    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
     if not val:
         return None
     text = str(val).strip()
@@ -293,142 +277,98 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 
 
 # -----------------------------------------------------------------------------
-# Enum Mappings (Exact match to C# Enums)
+# Enum Mappings
 # -----------------------------------------------------------------------------
 
-# TagStatusEnum: Unknown = 0, Active = 1, Disabled = 99
-TAG_STATUS_MAP: Dict[Any, str] = {
+USER_STATUS_MAP: Dict[Any, str] = {
     0: "Unknown",
     1: "Active",
     99: "Disabled",
     "unknown": "Unknown",
     "active": "Active",
     "disabled": "Disabled",
+    "inactive": "Disabled",
+}
+
+USER_GENDER_MAP: Dict[str, str] = {
+    "female": "Female",
+    "f": "Female",
+    "male": "Male",
+    "m": "Male",
+    "other": "Other",
+    "noinfo": "NoInfo",
+    "unknown": "NoInfo",
 }
 
 
-def map_tag_status(val: Any) -> str:
+def map_user_status(val: Any) -> str:
     if val is None:
         return "Active"
     if isinstance(val, int):
-        return TAG_STATUS_MAP.get(val, "Active")
+        return USER_STATUS_MAP.get(val, "Active")
     s = str(val).strip()
     if s.isdigit():
-        return TAG_STATUS_MAP.get(int(s), "Active")
-    return TAG_STATUS_MAP.get(s.lower(), "Active")
+        return USER_STATUS_MAP.get(int(s), "Active")
+    return USER_STATUS_MAP.get(s.lower(), "Active")
 
 
-# ArtefactStatusEnum: Unknown=0, Active=1, Etl=60, Published=70, PublishedToPublic=75, Uploaded=80, Downloaded=90, Disabled=99
-ARTEFACT_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    60: "Etl",
-    70: "Published",
-    75: "PublishedToPublic",
-    80: "Uploaded",
-    90: "Downloaded",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "etl": "Etl",
-    "published": "Published",
-    "publishedtopublic": "PublishedToPublic",
-    "published_to_public": "PublishedToPublic",
-    "uploaded": "Uploaded",
-    "downloaded": "Downloaded",
-    "disabled": "Disabled",
-}
-
-
-def map_artefact_status(val: Any) -> str:
+def map_user_gender(val: Any) -> str:
     if val is None:
-        return "Active"
-    if isinstance(val, int):
-        return ARTEFACT_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return ARTEFACT_STATUS_MAP.get(int(s), "Active")
-    norm = s.lower().replace(" ", "").replace("_", "")
-    return ARTEFACT_STATUS_MAP.get(norm, "Active")
+        return "NoInfo"
+    s = str(val).strip().lower()
+    return USER_GENDER_MAP.get(s, "NoInfo")
 
 
 # -----------------------------------------------------------------------------
-# Document Field Extractors
+# Document Field Extractor (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform all fields for artefact_tags table."""
+def extract_user_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for users table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    tag_id = clean_uuid(raw_id)
-    if not tag_id:
-        raise ValueError(f"ArtefactTag missing valid UUID: {raw_id}")
+    user_id = clean_uuid(raw_id)
+    if not user_id:
+        raise ValueError(f"User missing valid UUID: {raw_id}")
 
-    name = clean_str(doc.get("Name"), 150)
-    predefined = clean_bool(doc.get("Predefined"))
-    csn = clean_str(doc.get("CSN"), 100)
-    meta = as_json(doc.get("Meta") or {})
-    status = map_tag_status(doc.get("Status"))
+    password = clean_str(doc.get("Password"))
+    salt = clean_str(doc.get("Salt"), 100)
+    password_reset_on = parse_iso_timestamp(doc.get("PasswordResetOn"))
+    otp = clean_str(doc.get("OTP"), 50)
+    otp_validity = parse_iso_timestamp(doc.get("OTPValidity"))
+    handle = clean_str(doc.get("Handle"), 100)
+    force_change_password = clean_bool(doc.get("ForceChangePassword"), False)
+    password_changed_on = parse_iso_timestamp(doc.get("PasswordChangedOn"))
+    confirmed_on = parse_iso_timestamp(doc.get("ConfirmedOn"))
 
-    owner_id = clean_uuid(doc.get("OwnerId"))
-    parent_id = clean_uuid(doc.get("ParentId"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
-    created_by = clean_uuid(doc.get("CreatedBy"))
-    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
-    modified_by = clean_uuid(doc.get("ModifiedBy"))
+    profile = as_json(doc.get("Profile") if isinstance(doc.get("Profile"), dict) else {}, default_val={})
+    preferences = as_json(doc.get("Preferences") if isinstance(doc.get("Preferences"), dict) else {}, default_val={})
+    status = map_user_status(doc.get("Status"))
+    is_virtual = clean_bool(doc.get("IsVirtual"), False)
 
-    return (
-        tag_id,
-        name,
-        predefined,
-        csn,
-        meta,
-        status,
-        owner_id,
-        parent_id,
-        created_on,
-        created_by,
-        modified_on,
-        modified_by,
-    )
+    push_notifications = as_json(doc.get("PushNotifications") if isinstance(doc.get("PushNotifications"), list) else [], default_val=[])
+    personas = clean_string_list(doc.get("Personas"))
+    current_persona = clean_uuid(doc.get("CurrentPersona"))
 
+    recovery_email = clean_str(doc.get("RecoveryEmail"), 255)
+    recovery_mobile = clean_str(doc.get("RecoveryMobile"), 50)
+    first_name = clean_str(doc.get("FirstName"), 150)
+    middle_name = clean_str(doc.get("MiddleName"), 150)
+    last_name = clean_str(doc.get("LastName"), 150)
+    name = clean_str(doc.get("Name"), 250)
+    title = clean_str(doc.get("Title"), 50)
+    gender = map_user_gender(doc.get("Gender"))
+    dob = parse_iso_timestamp(doc.get("DOB"))
+    email = clean_str(doc.get("Email"), 255)
+    mobile = clean_str(doc.get("Mobile"), 50)
+    notification = clean_bool(doc.get("Notification"), True)
+    virtual_id = clean_str(doc.get("VirtualId"), 255)
 
-def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform all fields for artefacts table using JSONBs and TEXT[]."""
-    metadata = doc.get("@metadata") or {}
-    raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    art_id = clean_uuid(raw_id)
-    if not art_id:
-        raise ValueError(f"Artefact missing valid UUID: {raw_id}")
-
-    url = clean_str(doc.get("Url"))
-    title = clean_str(doc.get("Title"), 250)
-    description = clean_str(doc.get("Description"))
-    meta_data = as_json(doc.get("MetaData") or {})
-
+    contacts = as_json(doc.get("Contacts") if isinstance(doc.get("Contacts"), list) else [], default_val=[])
+    addresses = as_json(doc.get("Addresses") if isinstance(doc.get("Addresses"), list) else [], default_val=[])
     tags = clean_string_list(doc.get("Tags"))
-
-    mime_type = clean_str(doc.get("MimeType"), 100)
-    file_name = clean_str(doc.get("FileName"), 250)
-    file_size = clean_decimal(doc.get("FileSize"))
-    status = map_artefact_status(doc.get("Status"))
-    sha1 = clean_str(doc.get("SHA1"), 100)
-
-    model = clean_str(doc.get("Model"))
-    template = clean_str(doc.get("Template"))
-    csv_val = clean_str(doc.get("Csv"))
-
-    change_set = as_json(doc.get("ChangeSet") if isinstance(doc.get("ChangeSet"), list) else [])
-    comments = as_json(doc.get("Comments") if isinstance(doc.get("Comments"), list) else [])
-    video_links = as_json(doc.get("VideoLinks") if isinstance(doc.get("VideoLinks"), list) else [])
-    data_attributes = as_json(doc.get("DataAttributes") if isinstance(doc.get("DataAttributes"), list) else [])
-
-    published_on = parse_iso_timestamp(doc.get("PublishedOn"))
-    public_urls = clean_string_list(doc.get("PublicUrls"))
-    thumbnails = clean_string_list(doc.get("Thumbnails"))
+    attributes = as_json(doc.get("Attributes") if isinstance(doc.get("Attributes"), dict) else {}, default_val={})
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -440,27 +380,40 @@ def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
     modified_by = clean_uuid(doc.get("ModifiedBy"))
 
     return (
-        art_id,
-        url,
-        title,
-        description,
-        meta_data,
-        tags,
-        mime_type,
-        file_name,
-        file_size,
+        user_id,
+        password,
+        salt,
+        password_reset_on,
+        otp,
+        otp_validity,
+        handle,
+        force_change_password,
+        password_changed_on,
+        confirmed_on,
+        profile,
+        preferences,
         status,
-        sha1,
-        model,
-        template,
-        csv_val,
-        change_set,
-        comments,
-        video_links,
-        data_attributes,
-        published_on,
-        public_urls,
-        thumbnails,
+        is_virtual,
+        push_notifications,
+        personas,
+        current_persona,
+        recovery_email,
+        recovery_mobile,
+        first_name,
+        middle_name,
+        last_name,
+        name,
+        title,
+        gender,
+        dob,
+        email,
+        mobile,
+        notification,
+        virtual_id,
+        contacts,
+        addresses,
+        tags,
+        attributes,
         owner_id,
         parent_id,
         created_on,
@@ -471,46 +424,71 @@ def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums, artefact_tags and artefacts tables."""
+    """Create target enums and users table without secondary indexes."""
     cur.execute(
         """
         -- 1. Create Enums
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tag_status_enum') THEN
-                CREATE TYPE tag_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_status_enum') THEN
+                CREATE TYPE user_status_enum AS ENUM (
                     'Unknown',
                     'Active',
                     'Disabled'
                 );
             END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'artefact_status_enum') THEN
-                CREATE TYPE artefact_status_enum AS ENUM (
-                    'Unknown',
-                    'Active',
-                    'Etl',
-                    'Published',
-                    'PublishedToPublic',
-                    'Uploaded',
-                    'Downloaded',
-                    'Disabled'
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_gender_enum') THEN
+                CREATE TYPE user_gender_enum AS ENUM (
+                    'Female',
+                    'Male',
+                    'Other',
+                    'NoInfo'
                 );
             END IF;
         END $$;
 
-        -- 2. ArtefactTags Table
-        CREATE TABLE IF NOT EXISTS artefact_tags (
+        -- 2. Create Target Table (No secondary indexes)
+        CREATE TABLE IF NOT EXISTS "users" (
             id UUID PRIMARY KEY,
-            name VARCHAR(150),
-            predefined BOOLEAN DEFAULT FALSE,
-            csn VARCHAR(100),
-            meta JSONB DEFAULT '{}'::jsonb,
-            status tag_status_enum NOT NULL DEFAULT 'Active',
+            password TEXT,
+            salt VARCHAR(100),
+            password_reset_on TIMESTAMPTZ,
+            otp VARCHAR(50),
+            otp_validity TIMESTAMPTZ,
+            handle VARCHAR(100),
+            force_change_password BOOLEAN DEFAULT FALSE,
+            password_changed_on TIMESTAMPTZ,
+            confirmed_on TIMESTAMPTZ,
+            profile JSONB DEFAULT '{}'::jsonb,
+            preferences JSONB DEFAULT '{}'::jsonb,
+            status user_status_enum NOT NULL DEFAULT 'Active',
+            is_virtual BOOLEAN DEFAULT FALSE,
+            push_notifications JSONB DEFAULT '[]'::jsonb,
+            personas TEXT[] DEFAULT '{}'::text[],
+            current_persona UUID,
+            recovery_email VARCHAR(255),
+            recovery_mobile VARCHAR(50),
+            first_name VARCHAR(150),
+            middle_name VARCHAR(150),
+            last_name VARCHAR(150),
+            name VARCHAR(250),
+            title VARCHAR(50),
+            gender user_gender_enum NOT NULL DEFAULT 'NoInfo',
+            dob TIMESTAMPTZ,
+            email VARCHAR(255),
+            mobile VARCHAR(50),
+            notification BOOLEAN DEFAULT TRUE,
+            virtual_id VARCHAR(255),
+            contacts JSONB DEFAULT '[]'::jsonb,
+            addresses JSONB DEFAULT '[]'::jsonb,
+            tags TEXT[] DEFAULT '{}'::text[],
+            attributes JSONB DEFAULT '{}'::jsonb,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,
@@ -519,112 +497,74 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        -- 3. Artefacts Table
-        CREATE TABLE IF NOT EXISTS artefacts (
-            id UUID PRIMARY KEY,
-            url TEXT,
-            title VARCHAR(250),
-            description TEXT,
-            meta_data JSONB DEFAULT '{}'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            mime_type VARCHAR(100),
-            file_name VARCHAR(250),
-            file_size NUMERIC(18, 2),
-            status artefact_status_enum NOT NULL DEFAULT 'Active',
-            sha1 VARCHAR(100),
-            model TEXT,
-            template TEXT,
-            csv TEXT,
-            change_set JSONB DEFAULT '[]'::jsonb,
-            comments JSONB DEFAULT '[]'::jsonb,
-            video_links JSONB DEFAULT '[]'::jsonb,
-            data_attributes JSONB DEFAULT '[]'::jsonb,
-            published_on TIMESTAMPTZ,
-            public_urls TEXT[] DEFAULT '{}'::text[],
-            thumbnails TEXT[] DEFAULT '{}'::text[],
-            owner_id UUID,
-            parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
-            created_by UUID,
-            modified_on TIMESTAMPTZ,
-            modified_by UUID
-        );
+        -- Backward-compatibility view for singular 'user' query
+        CREATE OR REPLACE VIEW "user" AS SELECT * FROM "users";
         """
     )
 
 
 # -----------------------------------------------------------------------------
-# Database Upsert Operations
+# Database Upsert Operation
 # -----------------------------------------------------------------------------
 
 
-def upsert_tag(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert an ArtefactTag."""
-    fields = extract_tag_fields(doc)
+def upsert_user(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
+    """Idempotently upsert a User document."""
+    fields = extract_user_fields(doc)
     sql = """
-        INSERT INTO artefact_tags (
-            id, name, predefined, csn, meta, status,
+        INSERT INTO "users" (
+            id, password, salt, password_reset_on, otp, otp_validity, handle,
+            force_change_password, password_changed_on, confirmed_on,
+            profile, preferences, status, is_virtual, push_notifications,
+            personas, current_persona, recovery_email, recovery_mobile,
+            first_name, middle_name, last_name, name, title, gender,
+            dob, email, mobile, notification, virtual_id,
+            contacts, addresses, tags, attributes,
             owner_id, parent_id, created_on, created_by, modified_on, modified_by
         ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
-        )
-        ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            predefined = EXCLUDED.predefined,
-            csn = EXCLUDED.csn,
-            meta = EXCLUDED.meta,
-            status = EXCLUDED.status,
-            owner_id = EXCLUDED.owner_id,
-            parent_id = EXCLUDED.parent_id,
-            created_on = EXCLUDED.created_on,
-            created_by = EXCLUDED.created_by,
-            modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by
-        RETURNING (xmax = 0);
-    """
-    cur.execute(sql, fields)
-    row = cur.fetchone()
-    inserted = bool(row[0]) if row else False
-    return UpsertResult(record_id=fields[0], inserted=inserted)
-
-
-def upsert_artefact(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert an Artefact."""
-    fields = extract_artefact_fields(doc)
-    sql = """
-        INSERT INTO artefacts (
-            id, url, title, description, meta_data, tags, mime_type, file_name, file_size,
-            status, sha1, model, template, csv, change_set, comments, video_links,
-            data_attributes, published_on, public_urls, thumbnails,
-            owner_id, parent_id, created_on, created_by, modified_on, modified_by
-        ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
             %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            url = EXCLUDED.url,
-            title = EXCLUDED.title,
-            description = EXCLUDED.description,
-            meta_data = EXCLUDED.meta_data,
-            tags = EXCLUDED.tags,
-            mime_type = EXCLUDED.mime_type,
-            file_name = EXCLUDED.file_name,
-            file_size = EXCLUDED.file_size,
+            password = EXCLUDED.password,
+            salt = EXCLUDED.salt,
+            password_reset_on = EXCLUDED.password_reset_on,
+            otp = EXCLUDED.otp,
+            otp_validity = EXCLUDED.otp_validity,
+            handle = EXCLUDED.handle,
+            force_change_password = EXCLUDED.force_change_password,
+            password_changed_on = EXCLUDED.password_changed_on,
+            confirmed_on = EXCLUDED.confirmed_on,
+            profile = EXCLUDED.profile,
+            preferences = EXCLUDED.preferences,
             status = EXCLUDED.status,
-            sha1 = EXCLUDED.sha1,
-            model = EXCLUDED.model,
-            template = EXCLUDED.template,
-            csv = EXCLUDED.csv,
-            change_set = EXCLUDED.change_set,
-            comments = EXCLUDED.comments,
-            video_links = EXCLUDED.video_links,
-            data_attributes = EXCLUDED.data_attributes,
-            published_on = EXCLUDED.published_on,
-            public_urls = EXCLUDED.public_urls,
-            thumbnails = EXCLUDED.thumbnails,
+            is_virtual = EXCLUDED.is_virtual,
+            push_notifications = EXCLUDED.push_notifications,
+            personas = EXCLUDED.personas,
+            current_persona = EXCLUDED.current_persona,
+            recovery_email = EXCLUDED.recovery_email,
+            recovery_mobile = EXCLUDED.recovery_mobile,
+            first_name = EXCLUDED.first_name,
+            middle_name = EXCLUDED.middle_name,
+            last_name = EXCLUDED.last_name,
+            name = EXCLUDED.name,
+            title = EXCLUDED.title,
+            gender = EXCLUDED.gender,
+            dob = EXCLUDED.dob,
+            email = EXCLUDED.email,
+            mobile = EXCLUDED.mobile,
+            notification = EXCLUDED.notification,
+            virtual_id = EXCLUDED.virtual_id,
+            contacts = EXCLUDED.contacts,
+            addresses = EXCLUDED.addresses,
+            tags = EXCLUDED.tags,
+            attributes = EXCLUDED.attributes,
             owner_id = EXCLUDED.owner_id,
             parent_id = EXCLUDED.parent_id,
             created_on = EXCLUDED.created_on,
@@ -708,7 +648,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for artefact tags and artefacts."""
+    """Run the end-to-end migration for Users."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -718,20 +658,26 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collections=({cfg.tags_collection}, {cfg.artefacts_collection})"
+            f"collection={cfg.users_collection}"
         )
-        print("[1/5] Fetching RavenDB documents...")
-        tag_docs = raven_query_collection(
-            requests_session, cfg, cfg.tags_collection
-        )
-        art_docs = raven_query_collection(
-            requests_session, cfg, cfg.artefacts_collection
-        )
-        print(
-            f"Fetched artefact_tags={len(tag_docs)}, artefacts={len(art_docs)}"
+        print("[1/4] Fetching RavenDB documents...")
+        user_docs = raven_query_collection(
+            requests_session, cfg, cfg.users_collection
         )
 
-        print("[2/5] Connecting PostgreSQL...")
+        # Fallback to singular name if 0 docs fetched with default collection name
+        if not user_docs and cfg.users_collection == "Users":
+            try:
+                alt_docs = raven_query_collection(requests_session, cfg, "User")
+                if alt_docs:
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'User'.")
+                    user_docs = alt_docs
+            except Exception:
+                pass
+
+        print(f"Fetched users={len(user_docs)}")
+
+        print("[2/4] Connecting PostgreSQL...")
         print(
             f"PostgreSQL target: host={cfg.pg_host}, port={cfg.pg_port}, "
             f"db={cfg.pg_db}, user={cfg.pg_user}"
@@ -748,34 +694,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_tags = 0
-        new_tags = 0
-        loaded_arts = 0
-        new_arts = 0
+        loaded_users = 0
+        new_users = 0
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/5] Ensuring target schema...")
+                print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/5] Upserting artefact tags...")
-                for d in tag_docs:
-                    res = upsert_tag(cur, d)
-                    loaded_tags += 1
-                    new_tags += int(res.inserted)
-
-                print("[5/5] Upserting artefacts...")
-                for d in art_docs:
-                    res = upsert_artefact(cur, d)
-                    loaded_arts += 1
-                    new_arts += int(res.inserted)
-
-        # Post-load verification counts
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM artefact_tags")
-            total_tags = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM artefacts")
-            total_artefacts = int(cur.fetchone()[0])
+                print("[4/4] Upserting users...")
+                for d in user_docs:
+                    res = upsert_user(cur, d)
+                    loaded_users += 1
+                    new_users += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -784,8 +715,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "tags_collection": cfg.tags_collection,
-                "artefacts_collection": cfg.artefacts_collection,
+                "collection": cfg.users_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -794,22 +724,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "tags_processed": loaded_tags,
-                "new_tags_inserted": new_tags,
-                "artefacts_processed": loaded_arts,
-                "new_artefacts_inserted": new_arts,
-            },
-            "post_load_counts": {
-                "artefact_tags": total_tags,
-                "artefacts": total_artefacts,
+                "users_processed": loaded_users,
+                "new_users_inserted": new_users,
             },
         }
 
         print("Migration completed.")
-        print(f"artefacts_tags_processed: {loaded_tags}")
-        print(f"new_artefacts_tags_inserted: {new_tags}")
-        print(f"artefacts_processed: {loaded_arts}")
-        print(f"new_artefacts_inserted: {new_arts}")
+        print(f"users_processed: {loaded_users}")
+        print(f"new_users_inserted: {new_users}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

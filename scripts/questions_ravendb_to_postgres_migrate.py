@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Extract Artefacts and ArtefactTags data from RavenDB,
+Extract Questions, QATags, and RandomQuestionSubmissions data from RavenDB,
 transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
-and load into local PostgreSQL.
+and load into PostgreSQL.
 
 Target tables:
-- artefact_tags
-- artefacts
+- qa_tags
+- questions
+- random_question_submissions
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import json
@@ -19,8 +21,8 @@ import os
 from pathlib import Path
 import re
 import sys
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 import psycopg2
 from psycopg2.extras import Json
@@ -29,6 +31,8 @@ import requests
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
+
+UUID_NAMESPACE_QUESTIONS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 
 # -----------------------------------------------------------------------------
@@ -48,8 +52,9 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    artefacts_collection: str
-    tags_collection: str
+    qa_tags_collection: str
+    questions_collection: str
+    random_question_submissions_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -93,7 +98,7 @@ def parse_args() -> Config:
         load_env_file(root_env)
 
     parser = argparse.ArgumentParser(
-        description="Migrate Artefacts and ArtefactTags from RavenDB to PostgreSQL"
+        description="Migrate QATags, Questions, and RandomQuestionSubmissions from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -114,12 +119,21 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--artefacts-collection",
-        default=os.getenv("ARTEFACTS_COLLECTION", "Artefacts"),
+        "--qa-tags-collection",
+        default=os.getenv("QA_TAGS_COLLECTION", "QATags"),
+        help="RavenDB collection name for QA tags (default: QATags)",
     )
     parser.add_argument(
-        "--tags-collection",
-        default=os.getenv("ARTEFACT_TAGS_COLLECTION", "ArtefactTags"),
+        "--questions-collection",
+        default=os.getenv("QUESTIONS_COLLECTION", "Questions"),
+        help="RavenDB collection name for questions (default: Questions)",
+    )
+    parser.add_argument(
+        "--random-question-submissions-collection",
+        default=os.getenv(
+            "RANDOM_QUESTION_SUBMISSIONS_COLLECTION", "RandomQuestionSubmissions"
+        ),
+        help="RavenDB collection name for random question submissions (default: RandomQuestionSubmissions)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -186,8 +200,9 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        artefacts_collection=args.artefacts_collection,
-        tags_collection=args.tags_collection,
+        qa_tags_collection=args.qa_tags_collection,
+        questions_collection=args.questions_collection,
+        random_question_submissions_collection=args.random_question_submissions_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -224,21 +239,27 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any) -> bool:
+def clean_bool(val: Any, default: bool = False) -> bool:
     if val is None:
-        return False
+        return default
     if isinstance(val, bool):
         return val
     return str(val).strip().lower() in {"true", "1", "yes"}
 
 
-def clean_decimal(val: Any) -> Optional[Decimal]:
+def clean_decimal(val: Any, default: Optional[Decimal] = None) -> Optional[Decimal]:
+    """Parse numeric/decimal value into Decimal(10, 2)."""
     if val is None:
-        return None
+        return default
+    if isinstance(val, Decimal):
+        return val.quantize(Decimal("0.01"))
+    text = str(val).strip().replace(",", "")
+    if not text:
+        return default
     try:
-        return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.01"))
+        return Decimal(text).quantize(Decimal("0.01"))
     except (InvalidOperation, ValueError, TypeError):
-        return None
+        return default
 
 
 def clean_string_list(raw_val: Any) -> List[str]:
@@ -253,15 +274,32 @@ def clean_string_list(raw_val: Any) -> List[str]:
     return [str(raw_val)]
 
 
-def as_json(value: Any) -> Optional[Json]:
+def clean_sub_questions(raw_val: Any) -> List[Dict[str, Any]]:
+    """Clean sub-questions ensuring DefaultWeightage is valid decimal/float in JSONB."""
+    if not isinstance(raw_val, list):
+        return []
+    cleaned_list = []
+    for item in raw_val:
+        if isinstance(item, dict):
+            cleaned_item = dict(item)
+            if "DefaultWeightage" in cleaned_item and cleaned_item["DefaultWeightage"] is not None:
+                try:
+                    cleaned_item["DefaultWeightage"] = float(cleaned_item["DefaultWeightage"])
+                except (ValueError, TypeError):
+                    pass
+            cleaned_list.append(cleaned_item)
+    return cleaned_list
+
+
+def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return None
+        return Json(default_val) if default_val is not None else None
     return Json(value)
 
 
 def parse_iso_timestamp(val: Any) -> Optional[datetime]:
-    """Parse ISO timestamp safely."""
+    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
     if not val:
         return None
     text = str(val).strip()
@@ -297,79 +335,119 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 # -----------------------------------------------------------------------------
 
 # TagStatusEnum: Unknown = 0, Active = 1, Disabled = 99
-TAG_STATUS_MAP: Dict[Any, str] = {
+QA_TAG_STATUS_MAP: Dict[Any, str] = {
     0: "Unknown",
     1: "Active",
     99: "Disabled",
     "unknown": "Unknown",
     "active": "Active",
     "disabled": "Disabled",
+    "inactive": "Disabled",
+}
+
+# QuestionStatusEnum: unknown = 0, active = 1, disabled = 99, published = 50, wip = 40, archived = 80
+QUESTION_STATUS_MAP: Dict[Any, str] = {
+    0: "unknown",
+    1: "active",
+    40: "wip",
+    50: "published",
+    80: "archived",
+    99: "disabled",
+    "unknown": "unknown",
+    "active": "active",
+    "wip": "wip",
+    "published": "published",
+    "archived": "archived",
+    "disabled": "disabled",
+    "inactive": "disabled",
+}
+
+# AnswerEnum: Text = 1, OneOf = 2, ManyOf = 3
+QUESTION_ANSWER_TYPE_MAP: Dict[Any, str] = {
+    1: "Text",
+    2: "OneOf",
+    3: "ManyOf",
+    "text": "Text",
+    "oneof": "OneOf",
+    "manyof": "ManyOf",
+}
+
+# DifficultyEnum: low = 10, medium = 20, high = 30
+QUESTION_DIFFICULTY_MAP: Dict[Any, str] = {
+    10: "low",
+    20: "medium",
+    30: "high",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
 }
 
 
-def map_tag_status(val: Any) -> str:
+def map_qa_tag_status(val: Any) -> str:
     if val is None:
         return "Active"
     if isinstance(val, int):
-        return TAG_STATUS_MAP.get(val, "Active")
+        return QA_TAG_STATUS_MAP.get(val, "Active")
     s = str(val).strip()
     if s.isdigit():
-        return TAG_STATUS_MAP.get(int(s), "Active")
-    return TAG_STATUS_MAP.get(s.lower(), "Active")
+        return QA_TAG_STATUS_MAP.get(int(s), "Active")
+    return QA_TAG_STATUS_MAP.get(s.lower(), "Active")
 
 
-# ArtefactStatusEnum: Unknown=0, Active=1, Etl=60, Published=70, PublishedToPublic=75, Uploaded=80, Downloaded=90, Disabled=99
-ARTEFACT_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    60: "Etl",
-    70: "Published",
-    75: "PublishedToPublic",
-    80: "Uploaded",
-    90: "Downloaded",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "etl": "Etl",
-    "published": "Published",
-    "publishedtopublic": "PublishedToPublic",
-    "published_to_public": "PublishedToPublic",
-    "uploaded": "Uploaded",
-    "downloaded": "Downloaded",
-    "disabled": "Disabled",
-}
-
-
-def map_artefact_status(val: Any) -> str:
+def map_question_status(val: Any) -> str:
     if val is None:
-        return "Active"
+        return "wip"
     if isinstance(val, int):
-        return ARTEFACT_STATUS_MAP.get(val, "Active")
+        return QUESTION_STATUS_MAP.get(val, "wip")
     s = str(val).strip()
     if s.isdigit():
-        return ARTEFACT_STATUS_MAP.get(int(s), "Active")
+        return QUESTION_STATUS_MAP.get(int(s), "wip")
+    return QUESTION_STATUS_MAP.get(s.lower(), "wip")
+
+
+def map_question_answer_type(val: Any) -> str:
+    if val is None:
+        return "Text"
+    if isinstance(val, int):
+        return QUESTION_ANSWER_TYPE_MAP.get(val, "Text")
+    s = str(val).strip()
+    if s.isdigit():
+        return QUESTION_ANSWER_TYPE_MAP.get(int(s), "Text")
     norm = s.lower().replace(" ", "").replace("_", "")
-    return ARTEFACT_STATUS_MAP.get(norm, "Active")
+    return QUESTION_ANSWER_TYPE_MAP.get(norm, "Text")
+
+
+def map_question_difficulty(val: Any) -> str:
+    if val is None:
+        return "low"
+    if isinstance(val, int):
+        return QUESTION_DIFFICULTY_MAP.get(val, "low")
+    s = str(val).strip()
+    if s.isdigit():
+        return QUESTION_DIFFICULTY_MAP.get(int(s), "low")
+    return QUESTION_DIFFICULTY_MAP.get(s.lower(), "low")
 
 
 # -----------------------------------------------------------------------------
-# Document Field Extractors
+# Document Field Extractors (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform all fields for artefact_tags table."""
+def extract_qa_tag_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for qa_tags table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
     tag_id = clean_uuid(raw_id)
+    if not tag_id and raw_id:
+        tag_id = str(uuid.uuid5(UUID_NAMESPACE_QUESTIONS, str(raw_id).strip())).lower()
     if not tag_id:
-        raise ValueError(f"ArtefactTag missing valid UUID: {raw_id}")
+        raise ValueError(f"QATag missing valid ID: {raw_id}")
 
-    name = clean_str(doc.get("Name"), 150)
-    predefined = clean_bool(doc.get("Predefined"))
-    csn = clean_str(doc.get("CSN"), 100)
-    meta = as_json(doc.get("Meta") or {})
-    status = map_tag_status(doc.get("Status"))
+    name = clean_str(doc.get("Name"), 255)
+    predefined = clean_bool(doc.get("Predefined"), default=False)
+    csn = clean_str(doc.get("CSN"), 50)
+    meta = as_json(doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {}, default_val={})
+    status = map_qa_tag_status(doc.get("Status"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -396,39 +474,33 @@ def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
     )
 
 
-def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform all fields for artefacts table using JSONBs and TEXT[]."""
+def extract_question_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for questions table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    art_id = clean_uuid(raw_id)
-    if not art_id:
-        raise ValueError(f"Artefact missing valid UUID: {raw_id}")
+    question_id = clean_uuid(raw_id)
+    if not question_id and raw_id:
+        question_id = str(uuid.uuid5(UUID_NAMESPACE_QUESTIONS, str(raw_id).strip())).lower()
+    if not question_id:
+        raise ValueError(f"Question missing valid ID: {raw_id}")
 
-    url = clean_str(doc.get("Url"))
-    title = clean_str(doc.get("Title"), 250)
-    description = clean_str(doc.get("Description"))
-    meta_data = as_json(doc.get("MetaData") or {})
+    question_text = clean_str(doc.get("QuestionText"))
+    plain_text = clean_str(doc.get("PlainText"))
+    html_text = clean_str(doc.get("HtmlText"))
+    tag_list = clean_string_list(doc.get("TagList"))
 
-    tags = clean_string_list(doc.get("Tags"))
-
-    mime_type = clean_str(doc.get("MimeType"), 100)
-    file_name = clean_str(doc.get("FileName"), 250)
-    file_size = clean_decimal(doc.get("FileSize"))
-    status = map_artefact_status(doc.get("Status"))
-    sha1 = clean_str(doc.get("SHA1"), 100)
-
-    model = clean_str(doc.get("Model"))
-    template = clean_str(doc.get("Template"))
-    csv_val = clean_str(doc.get("Csv"))
-
-    change_set = as_json(doc.get("ChangeSet") if isinstance(doc.get("ChangeSet"), list) else [])
-    comments = as_json(doc.get("Comments") if isinstance(doc.get("Comments"), list) else [])
-    video_links = as_json(doc.get("VideoLinks") if isinstance(doc.get("VideoLinks"), list) else [])
-    data_attributes = as_json(doc.get("DataAttributes") if isinstance(doc.get("DataAttributes"), list) else [])
-
-    published_on = parse_iso_timestamp(doc.get("PublishedOn"))
-    public_urls = clean_string_list(doc.get("PublicUrls"))
-    thumbnails = clean_string_list(doc.get("Thumbnails"))
+    options = as_json(doc.get("Options") if isinstance(doc.get("Options"), list) else [], default_val=[])
+    meta = as_json(doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {}, default_val={})
+    status = map_question_status(doc.get("Status"))
+    answer_type = map_question_answer_type(doc.get("AnswerType"))
+    hints = as_json(doc.get("Hints") if isinstance(doc.get("Hints"), list) else [], default_val=[])
+    instruction = clean_str(doc.get("Instruction"))
+    default_weightage = clean_decimal(doc.get("DefaultWeightage"), default=Decimal("1.00"))
+    sub_questions = as_json(clean_sub_questions(doc.get("Questions")), default_val=[])
+    difficulty = map_question_difficulty(doc.get("Difficulty"))
+    keywords = clean_string_list(doc.get("Keywords"))
+    isn = clean_str(doc.get("ISN"), 50)
+    answer_text = clean_str(doc.get("AnswerText"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -440,27 +512,63 @@ def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
     modified_by = clean_uuid(doc.get("ModifiedBy"))
 
     return (
-        art_id,
-        url,
-        title,
-        description,
-        meta_data,
-        tags,
-        mime_type,
-        file_name,
-        file_size,
+        question_id,
+        question_text,
+        plain_text,
+        html_text,
+        tag_list,
+        options,
+        meta,
         status,
-        sha1,
-        model,
-        template,
-        csv_val,
-        change_set,
-        comments,
-        video_links,
-        data_attributes,
-        published_on,
-        public_urls,
-        thumbnails,
+        answer_type,
+        hints,
+        instruction,
+        default_weightage,
+        sub_questions,
+        difficulty,
+        keywords,
+        isn,
+        answer_text,
+        owner_id,
+        parent_id,
+        created_on,
+        created_by,
+        modified_on,
+        modified_by,
+    )
+
+
+def extract_random_question_submission_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for random_question_submissions table."""
+    metadata = doc.get("@metadata") or {}
+    raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
+    submission_id = clean_uuid(raw_id)
+    if not submission_id and raw_id:
+        submission_id = str(uuid.uuid5(UUID_NAMESPACE_QUESTIONS, str(raw_id).strip())).lower()
+    if not submission_id:
+        raise ValueError(f"RandomQuestionSubmission missing valid ID: {raw_id}")
+
+    user_id = clean_uuid(doc.get("UserId"))
+    user_email = clean_str(doc.get("UserEmail"), 255)
+    questions_answered = as_json(
+        doc.get("QuestionsAnswered") if isinstance(doc.get("QuestionsAnswered"), list) else [],
+        default_val=[],
+    )
+
+    owner_id = clean_uuid(doc.get("OwnerId"))
+    parent_id = clean_uuid(doc.get("ParentId"))
+    created_on = parse_iso_timestamp(
+        doc.get("CreatedOn") or metadata.get("@last-modified")
+    ) or datetime.now(timezone.utc)
+    created_by = clean_uuid(doc.get("CreatedBy"))
+    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
+    modified_by = clean_uuid(doc.get("ModifiedBy"))
+
+    return (
+        submission_id,
+        user_id,
+        user_email,
+        questions_answered,
         owner_id,
         parent_id,
         created_on,
@@ -471,46 +579,61 @@ def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums, artefact_tags and artefacts tables."""
+    """Create target enums and tables without secondary indexes."""
     cur.execute(
         """
-        -- 1. Create Enums
+        -- 1. Create or extend Enums
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tag_status_enum') THEN
-                CREATE TYPE tag_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'qa_tag_status_enum') THEN
+                CREATE TYPE qa_tag_status_enum AS ENUM (
                     'Unknown',
                     'Active',
                     'Disabled'
                 );
             END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'artefact_status_enum') THEN
-                CREATE TYPE artefact_status_enum AS ENUM (
-                    'Unknown',
-                    'Active',
-                    'Etl',
-                    'Published',
-                    'PublishedToPublic',
-                    'Uploaded',
-                    'Downloaded',
-                    'Disabled'
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'question_status_enum') THEN
+                CREATE TYPE question_status_enum AS ENUM (
+                    'unknown',
+                    'active',
+                    'disabled',
+                    'published',
+                    'wip',
+                    'archived'
+                );
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'question_answer_type_enum') THEN
+                CREATE TYPE question_answer_type_enum AS ENUM (
+                    'Text',
+                    'OneOf',
+                    'ManyOf'
+                );
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'question_difficulty_enum') THEN
+                CREATE TYPE question_difficulty_enum AS ENUM (
+                    'low',
+                    'medium',
+                    'high'
                 );
             END IF;
         END $$;
 
-        -- 2. ArtefactTags Table
-        CREATE TABLE IF NOT EXISTS artefact_tags (
+        -- 2. Create Target Tables (No secondary indexes)
+        CREATE TABLE IF NOT EXISTS qa_tags (
             id UUID PRIMARY KEY,
-            name VARCHAR(150),
+            name VARCHAR(255),
             predefined BOOLEAN DEFAULT FALSE,
-            csn VARCHAR(100),
+            csn VARCHAR(50),
             meta JSONB DEFAULT '{}'::jsonb,
-            status tag_status_enum NOT NULL DEFAULT 'Active',
+            status qa_tag_status_enum NOT NULL DEFAULT 'Active',
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,
@@ -519,29 +642,37 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        -- 3. Artefacts Table
-        CREATE TABLE IF NOT EXISTS artefacts (
+        CREATE TABLE IF NOT EXISTS questions (
             id UUID PRIMARY KEY,
-            url TEXT,
-            title VARCHAR(250),
-            description TEXT,
-            meta_data JSONB DEFAULT '{}'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            mime_type VARCHAR(100),
-            file_name VARCHAR(250),
-            file_size NUMERIC(18, 2),
-            status artefact_status_enum NOT NULL DEFAULT 'Active',
-            sha1 VARCHAR(100),
-            model TEXT,
-            template TEXT,
-            csv TEXT,
-            change_set JSONB DEFAULT '[]'::jsonb,
-            comments JSONB DEFAULT '[]'::jsonb,
-            video_links JSONB DEFAULT '[]'::jsonb,
-            data_attributes JSONB DEFAULT '[]'::jsonb,
-            published_on TIMESTAMPTZ,
-            public_urls TEXT[] DEFAULT '{}'::text[],
-            thumbnails TEXT[] DEFAULT '{}'::text[],
+            question_text TEXT,
+            plain_text TEXT,
+            html_text TEXT,
+            tag_list TEXT[] DEFAULT '{}'::text[],
+            options JSONB DEFAULT '[]'::jsonb,
+            meta JSONB DEFAULT '{}'::jsonb,
+            status question_status_enum NOT NULL DEFAULT 'wip',
+            answer_type question_answer_type_enum NOT NULL DEFAULT 'Text',
+            hints JSONB DEFAULT '[]'::jsonb,
+            instruction TEXT,
+            default_weightage NUMERIC(10, 2) DEFAULT 1.00,
+            questions JSONB DEFAULT '[]'::jsonb,
+            difficulty question_difficulty_enum NOT NULL DEFAULT 'low',
+            keywords TEXT[] DEFAULT '{}'::text[],
+            isn VARCHAR(50),
+            answer_text TEXT,
+            owner_id UUID,
+            parent_id UUID,
+            created_on TIMESTAMPTZ NOT NULL,
+            created_by UUID,
+            modified_on TIMESTAMPTZ,
+            modified_by UUID
+        );
+
+        CREATE TABLE IF NOT EXISTS random_question_submissions (
+            id UUID PRIMARY KEY,
+            user_id UUID,
+            user_email VARCHAR(255),
+            questions_answered JSONB DEFAULT '[]'::jsonb,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,
@@ -558,11 +689,13 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_tag(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert an ArtefactTag."""
-    fields = extract_tag_fields(doc)
+def upsert_qa_tag(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert a QATag document."""
+    fields = extract_qa_tag_fields(doc)
     sql = """
-        INSERT INTO artefact_tags (
+        INSERT INTO qa_tags (
             id, name, predefined, csn, meta, status,
             owner_id, parent_id, created_on, created_by, modified_on, modified_by
         ) VALUES (
@@ -589,42 +722,71 @@ def upsert_tag(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertRe
     return UpsertResult(record_id=fields[0], inserted=inserted)
 
 
-def upsert_artefact(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert an Artefact."""
-    fields = extract_artefact_fields(doc)
+def upsert_question(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert a Question document."""
+    fields = extract_question_fields(doc)
     sql = """
-        INSERT INTO artefacts (
-            id, url, title, description, meta_data, tags, mime_type, file_name, file_size,
-            status, sha1, model, template, csv, change_set, comments, video_links,
-            data_attributes, published_on, public_urls, thumbnails,
+        INSERT INTO questions (
+            id, question_text, plain_text, html_text, tag_list, options, meta,
+            status, answer_type, hints, instruction, default_weightage,
+            questions, difficulty, keywords, isn, answer_text,
             owner_id, parent_id, created_on, created_by, modified_on, modified_by
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            question_text = EXCLUDED.question_text,
+            plain_text = EXCLUDED.plain_text,
+            html_text = EXCLUDED.html_text,
+            tag_list = EXCLUDED.tag_list,
+            options = EXCLUDED.options,
+            meta = EXCLUDED.meta,
+            status = EXCLUDED.status,
+            answer_type = EXCLUDED.answer_type,
+            hints = EXCLUDED.hints,
+            instruction = EXCLUDED.instruction,
+            default_weightage = EXCLUDED.default_weightage,
+            questions = EXCLUDED.questions,
+            difficulty = EXCLUDED.difficulty,
+            keywords = EXCLUDED.keywords,
+            isn = EXCLUDED.isn,
+            answer_text = EXCLUDED.answer_text,
+            owner_id = EXCLUDED.owner_id,
+            parent_id = EXCLUDED.parent_id,
+            created_on = EXCLUDED.created_on,
+            created_by = EXCLUDED.created_by,
+            modified_on = EXCLUDED.modified_on,
+            modified_by = EXCLUDED.modified_by
+        RETURNING (xmax = 0);
+    """
+    cur.execute(sql, fields)
+    row = cur.fetchone()
+    inserted = bool(row[0]) if row else False
+    return UpsertResult(record_id=fields[0], inserted=inserted)
+
+
+def upsert_random_question_submission(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert a RandomQuestionSubmission document."""
+    fields = extract_random_question_submission_fields(doc)
+    sql = """
+        INSERT INTO random_question_submissions (
+            id, user_id, user_email, questions_answered,
+            owner_id, parent_id, created_on, created_by, modified_on, modified_by
+        ) VALUES (
             %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            url = EXCLUDED.url,
-            title = EXCLUDED.title,
-            description = EXCLUDED.description,
-            meta_data = EXCLUDED.meta_data,
-            tags = EXCLUDED.tags,
-            mime_type = EXCLUDED.mime_type,
-            file_name = EXCLUDED.file_name,
-            file_size = EXCLUDED.file_size,
-            status = EXCLUDED.status,
-            sha1 = EXCLUDED.sha1,
-            model = EXCLUDED.model,
-            template = EXCLUDED.template,
-            csv = EXCLUDED.csv,
-            change_set = EXCLUDED.change_set,
-            comments = EXCLUDED.comments,
-            video_links = EXCLUDED.video_links,
-            data_attributes = EXCLUDED.data_attributes,
-            published_on = EXCLUDED.published_on,
-            public_urls = EXCLUDED.public_urls,
-            thumbnails = EXCLUDED.thumbnails,
+            user_id = EXCLUDED.user_id,
+            user_email = EXCLUDED.user_email,
+            questions_answered = EXCLUDED.questions_answered,
             owner_id = EXCLUDED.owner_id,
             parent_id = EXCLUDED.parent_id,
             created_on = EXCLUDED.created_on,
@@ -708,7 +870,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for artefact tags and artefacts."""
+    """Run the end-to-end migration for Questions module."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -716,22 +878,49 @@ def main() -> int:
     try:
         configure_raven_session(requests_session, cfg)
 
-        print(
-            f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collections=({cfg.tags_collection}, {cfg.artefacts_collection})"
-        )
-        print("[1/5] Fetching RavenDB documents...")
-        tag_docs = raven_query_collection(
-            requests_session, cfg, cfg.tags_collection
-        )
-        art_docs = raven_query_collection(
-            requests_session, cfg, cfg.artefacts_collection
-        )
-        print(
-            f"Fetched artefact_tags={len(tag_docs)}, artefacts={len(art_docs)}"
-        )
+        print(f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}")
+        print("[1/4] Fetching RavenDB documents for all 3 collections...")
 
-        print("[2/5] Connecting PostgreSQL...")
+        # 1. Fetch QATags
+        qa_tag_docs = raven_query_collection(
+            requests_session, cfg, cfg.qa_tags_collection
+        )
+        if not qa_tag_docs and cfg.qa_tags_collection == "QATags":
+            try:
+                alt = raven_query_collection(requests_session, cfg, "QATag")
+                if alt:
+                    qa_tag_docs = alt
+            except Exception:
+                pass
+        print(f"Fetched qa_tags={len(qa_tag_docs)}")
+
+        # 2. Fetch Questions
+        question_docs = raven_query_collection(
+            requests_session, cfg, cfg.questions_collection
+        )
+        if not question_docs and cfg.questions_collection == "Questions":
+            try:
+                alt = raven_query_collection(requests_session, cfg, "Question")
+                if alt:
+                    question_docs = alt
+            except Exception:
+                pass
+        print(f"Fetched questions={len(question_docs)}")
+
+        # 3. Fetch RandomQuestionSubmissions
+        submission_docs = raven_query_collection(
+            requests_session, cfg, cfg.random_question_submissions_collection
+        )
+        if not submission_docs and cfg.random_question_submissions_collection == "RandomQuestionSubmissions":
+            try:
+                alt = raven_query_collection(requests_session, cfg, "RandomQuestionSubmission")
+                if alt:
+                    submission_docs = alt
+            except Exception:
+                pass
+        print(f"Fetched random_question_submissions={len(submission_docs)}")
+
+        print("[2/4] Connecting PostgreSQL...")
         print(
             f"PostgreSQL target: host={cfg.pg_host}, port={cfg.pg_port}, "
             f"db={cfg.pg_db}, user={cfg.pg_user}"
@@ -750,32 +939,34 @@ def main() -> int:
 
         loaded_tags = 0
         new_tags = 0
-        loaded_arts = 0
-        new_arts = 0
+        loaded_questions = 0
+        new_questions = 0
+        loaded_submissions = 0
+        new_submissions = 0
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/5] Ensuring target schema...")
+                print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/5] Upserting artefact tags...")
-                for d in tag_docs:
-                    res = upsert_tag(cur, d)
+                print("[4/4] Upserting documents...")
+                # 1. Upsert QATags
+                for d in qa_tag_docs:
+                    res = upsert_qa_tag(cur, d)
                     loaded_tags += 1
                     new_tags += int(res.inserted)
 
-                print("[5/5] Upserting artefacts...")
-                for d in art_docs:
-                    res = upsert_artefact(cur, d)
-                    loaded_arts += 1
-                    new_arts += int(res.inserted)
+                # 2. Upsert Questions
+                for d in question_docs:
+                    res = upsert_question(cur, d)
+                    loaded_questions += 1
+                    new_questions += int(res.inserted)
 
-        # Post-load verification counts
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM artefact_tags")
-            total_tags = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM artefacts")
-            total_artefacts = int(cur.fetchone()[0])
+                # 3. Upsert RandomQuestionSubmissions
+                for d in submission_docs:
+                    res = upsert_random_question_submission(cur, d)
+                    loaded_submissions += 1
+                    new_submissions += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -784,8 +975,11 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "tags_collection": cfg.tags_collection,
-                "artefacts_collection": cfg.artefacts_collection,
+                "collections": {
+                    "qa_tags": cfg.qa_tags_collection,
+                    "questions": cfg.questions_collection,
+                    "random_question_submissions": cfg.random_question_submissions_collection,
+                },
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -794,22 +988,21 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "tags_processed": loaded_tags,
-                "new_tags_inserted": new_tags,
-                "artefacts_processed": loaded_arts,
-                "new_artefacts_inserted": new_arts,
-            },
-            "post_load_counts": {
-                "artefact_tags": total_tags,
-                "artefacts": total_artefacts,
+                "qa_tags_processed": loaded_tags,
+                "new_qa_tags_inserted": new_tags,
+                "questions_processed": loaded_questions,
+                "new_questions_inserted": new_questions,
+                "random_question_submissions_processed": loaded_submissions,
+                "new_random_question_submissions_inserted": new_submissions,
             },
         }
 
         print("Migration completed.")
-        print(f"artefacts_tags_processed: {loaded_tags}")
-        print(f"new_artefacts_tags_inserted: {new_tags}")
-        print(f"artefacts_processed: {loaded_arts}")
-        print(f"new_artefacts_inserted: {new_arts}")
+        print(f"qa_tags_processed: {loaded_tags}, new_inserted: {new_tags}")
+        print(f"questions_processed: {loaded_questions}, new_inserted: {new_questions}")
+        print(
+            f"random_question_submissions_processed: {loaded_submissions}, new_inserted: {new_submissions}"
+        )
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

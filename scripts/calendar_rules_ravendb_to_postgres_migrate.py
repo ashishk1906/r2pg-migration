@@ -1,34 +1,44 @@
 #!/usr/bin/env python3
 """
-Extract Artefacts and ArtefactTags data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
-and load into local PostgreSQL.
+Extract CalendarRules data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL ENUMs,
+and load into PostgreSQL.
 
-Target tables:
-- artefact_tags
-- artefacts
+Target table:
+- calendar_rules
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
 import re
 import sys
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 import psycopg2
-from psycopg2.extras import Json
 import requests
 
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
+
+UUID_NAMESPACE_CALENDAR_RULES = uuid.UUID("6ba7b81a-9dad-11d1-80b4-00c04fd430c8")
+
+CALENDAR_RULE_STATUS_MAP: Dict[Any, str] = {
+    0: "Unknown",
+    1: "Active",
+    99: "Disabled",
+    "unknown": "Unknown",
+    "active": "Active",
+    "disabled": "Disabled",
+    "inactive": "Disabled",
+}
 
 
 # -----------------------------------------------------------------------------
@@ -48,8 +58,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    artefacts_collection: str
-    tags_collection: str
+    calendar_rules_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -93,7 +102,7 @@ def parse_args() -> Config:
         load_env_file(root_env)
 
     parser = argparse.ArgumentParser(
-        description="Migrate Artefacts and ArtefactTags from RavenDB to PostgreSQL"
+        description="Migrate CalendarRules from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -114,12 +123,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--artefacts-collection",
-        default=os.getenv("ARTEFACTS_COLLECTION", "Artefacts"),
-    )
-    parser.add_argument(
-        "--tags-collection",
-        default=os.getenv("ARTEFACT_TAGS_COLLECTION", "ArtefactTags"),
+        "--calendar-rules-collection",
+        default=os.getenv("CALENDAR_RULES_COLLECTION", "CalendarRules"),
+        help="RavenDB collection name for calendar rules (default: CalendarRules)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -186,8 +192,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        artefacts_collection=args.artefacts_collection,
-        tags_collection=args.tags_collection,
+        calendar_rules_collection=args.calendar_rules_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -224,44 +229,25 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any) -> bool:
+def clean_int(val: Any, default: Optional[int] = 0) -> Optional[int]:
     if val is None:
-        return False
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def clean_bool(val: Any, default: bool = False) -> bool:
+    if val is None:
+        return default
     if isinstance(val, bool):
         return val
     return str(val).strip().lower() in {"true", "1", "yes"}
 
 
-def clean_decimal(val: Any) -> Optional[Decimal]:
-    if val is None:
-        return None
-    try:
-        return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.01"))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
-
-
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
-    if raw_val is None:
-        return []
-    if isinstance(raw_val, list):
-        return [str(item).strip() for item in raw_val if str(item).strip()]
-    if isinstance(raw_val, str):
-        cleaned = raw_val.strip()
-        return [cleaned] if cleaned else []
-    return [str(raw_val)]
-
-
-def as_json(value: Any) -> Optional[Json]:
-    """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
-    if value is None:
-        return None
-    return Json(value)
-
-
 def parse_iso_timestamp(val: Any) -> Optional[datetime]:
-    """Parse ISO timestamp safely."""
+    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
     if not val:
         return None
     text = str(val).strip()
@@ -292,85 +278,51 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-# -----------------------------------------------------------------------------
-# Enum Mappings (Exact match to C# Enums)
-# -----------------------------------------------------------------------------
-
-# TagStatusEnum: Unknown = 0, Active = 1, Disabled = 99
-TAG_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "disabled": "Disabled",
-}
-
-
-def map_tag_status(val: Any) -> str:
+def map_calendar_rule_status(val: Any) -> str:
+    """Map status string/int to calendar_rule_status_enum."""
     if val is None:
         return "Active"
     if isinstance(val, int):
-        return TAG_STATUS_MAP.get(val, "Active")
+        return CALENDAR_RULE_STATUS_MAP.get(val, "Active")
     s = str(val).strip()
     if s.isdigit():
-        return TAG_STATUS_MAP.get(int(s), "Active")
-    return TAG_STATUS_MAP.get(s.lower(), "Active")
-
-
-# ArtefactStatusEnum: Unknown=0, Active=1, Etl=60, Published=70, PublishedToPublic=75, Uploaded=80, Downloaded=90, Disabled=99
-ARTEFACT_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    60: "Etl",
-    70: "Published",
-    75: "PublishedToPublic",
-    80: "Uploaded",
-    90: "Downloaded",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "etl": "Etl",
-    "published": "Published",
-    "publishedtopublic": "PublishedToPublic",
-    "published_to_public": "PublishedToPublic",
-    "uploaded": "Uploaded",
-    "downloaded": "Downloaded",
-    "disabled": "Disabled",
-}
-
-
-def map_artefact_status(val: Any) -> str:
-    if val is None:
-        return "Active"
-    if isinstance(val, int):
-        return ARTEFACT_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return ARTEFACT_STATUS_MAP.get(int(s), "Active")
-    norm = s.lower().replace(" ", "").replace("_", "")
-    return ARTEFACT_STATUS_MAP.get(norm, "Active")
+        return CALENDAR_RULE_STATUS_MAP.get(int(s), "Active")
+    return CALENDAR_RULE_STATUS_MAP.get(s.lower(), "Active")
 
 
 # -----------------------------------------------------------------------------
-# Document Field Extractors
+# Document Field Extractor (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform all fields for artefact_tags table."""
+def extract_calendar_rule_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for calendar_rules table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    tag_id = clean_uuid(raw_id)
-    if not tag_id:
-        raise ValueError(f"ArtefactTag missing valid UUID: {raw_id}")
+    rule_id = None
+    if raw_id:
+        clean_raw = str(raw_id).strip()
+        last_part = clean_raw.rsplit("/", 1)[-1]
+        if UUID_RE.fullmatch(last_part):
+            rule_id = last_part.lower()
+        elif UUID_RE.fullmatch(clean_raw):
+            rule_id = clean_raw.lower()
+        else:
+            rule_id = str(
+                uuid.uuid5(UUID_NAMESPACE_CALENDAR_RULES, clean_raw)
+            ).lower()
+    if not rule_id:
+        raise ValueError(f"CalendarRule missing valid ID: {raw_id}")
 
-    name = clean_str(doc.get("Name"), 150)
-    predefined = clean_bool(doc.get("Predefined"))
-    csn = clean_str(doc.get("CSN"), 100)
-    meta = as_json(doc.get("Meta") or {})
-    status = map_tag_status(doc.get("Status"))
-
+    title = clean_str(doc.get("Title"), 255)
+    cron_expression = clean_str(doc.get("CronExpression"), 100)
+    calendar_rule_status = map_calendar_rule_status(doc.get("CalendarRuleStatus"))
+    calendar_event_category = clean_str(doc.get("CalendarEventCategory"), 100)
+    weight = clean_int(doc.get("Weight"), default=0)
+    duration = clean_int(doc.get("Duration"), default=0)
+    topic_id = clean_uuid(doc.get("TopicId"))
+    user_id = clean_uuid(doc.get("UserId"))
+    create_meeting_link = clean_bool(doc.get("CreateMeetingLink"), default=False)
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
     created_on = parse_iso_timestamp(
@@ -381,86 +333,16 @@ def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
     modified_by = clean_uuid(doc.get("ModifiedBy"))
 
     return (
-        tag_id,
-        name,
-        predefined,
-        csn,
-        meta,
-        status,
-        owner_id,
-        parent_id,
-        created_on,
-        created_by,
-        modified_on,
-        modified_by,
-    )
-
-
-def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform all fields for artefacts table using JSONBs and TEXT[]."""
-    metadata = doc.get("@metadata") or {}
-    raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    art_id = clean_uuid(raw_id)
-    if not art_id:
-        raise ValueError(f"Artefact missing valid UUID: {raw_id}")
-
-    url = clean_str(doc.get("Url"))
-    title = clean_str(doc.get("Title"), 250)
-    description = clean_str(doc.get("Description"))
-    meta_data = as_json(doc.get("MetaData") or {})
-
-    tags = clean_string_list(doc.get("Tags"))
-
-    mime_type = clean_str(doc.get("MimeType"), 100)
-    file_name = clean_str(doc.get("FileName"), 250)
-    file_size = clean_decimal(doc.get("FileSize"))
-    status = map_artefact_status(doc.get("Status"))
-    sha1 = clean_str(doc.get("SHA1"), 100)
-
-    model = clean_str(doc.get("Model"))
-    template = clean_str(doc.get("Template"))
-    csv_val = clean_str(doc.get("Csv"))
-
-    change_set = as_json(doc.get("ChangeSet") if isinstance(doc.get("ChangeSet"), list) else [])
-    comments = as_json(doc.get("Comments") if isinstance(doc.get("Comments"), list) else [])
-    video_links = as_json(doc.get("VideoLinks") if isinstance(doc.get("VideoLinks"), list) else [])
-    data_attributes = as_json(doc.get("DataAttributes") if isinstance(doc.get("DataAttributes"), list) else [])
-
-    published_on = parse_iso_timestamp(doc.get("PublishedOn"))
-    public_urls = clean_string_list(doc.get("PublicUrls"))
-    thumbnails = clean_string_list(doc.get("Thumbnails"))
-
-    owner_id = clean_uuid(doc.get("OwnerId"))
-    parent_id = clean_uuid(doc.get("ParentId"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
-    created_by = clean_uuid(doc.get("CreatedBy"))
-    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
-    modified_by = clean_uuid(doc.get("ModifiedBy"))
-
-    return (
-        art_id,
-        url,
+        rule_id,
         title,
-        description,
-        meta_data,
-        tags,
-        mime_type,
-        file_name,
-        file_size,
-        status,
-        sha1,
-        model,
-        template,
-        csv_val,
-        change_set,
-        comments,
-        video_links,
-        data_attributes,
-        published_on,
-        public_urls,
-        thumbnails,
+        cron_expression,
+        calendar_rule_status,
+        calendar_event_category,
+        weight,
+        duration,
+        topic_id,
+        user_id,
+        create_meeting_link,
         owner_id,
         parent_id,
         created_on,
@@ -471,80 +353,39 @@ def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes, no views)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums, artefact_tags and artefacts tables."""
+    """Create target enums and calendar_rules table without secondary indexes or views."""
     cur.execute(
         """
-        -- 1. Create Enums
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tag_status_enum') THEN
-                CREATE TYPE tag_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'calendar_rule_status_enum') THEN
+                CREATE TYPE calendar_rule_status_enum AS ENUM (
                     'Unknown',
                     'Active',
-                    'Disabled'
-                );
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'artefact_status_enum') THEN
-                CREATE TYPE artefact_status_enum AS ENUM (
-                    'Unknown',
-                    'Active',
-                    'Etl',
-                    'Published',
-                    'PublishedToPublic',
-                    'Uploaded',
-                    'Downloaded',
                     'Disabled'
                 );
             END IF;
         END $$;
 
-        -- 2. ArtefactTags Table
-        CREATE TABLE IF NOT EXISTS artefact_tags (
+        CREATE TABLE IF NOT EXISTS calendar_rules (
             id UUID PRIMARY KEY,
-            name VARCHAR(150),
-            predefined BOOLEAN DEFAULT FALSE,
-            csn VARCHAR(100),
-            meta JSONB DEFAULT '{}'::jsonb,
-            status tag_status_enum NOT NULL DEFAULT 'Active',
+            title VARCHAR(255),
+            cron_expression VARCHAR(100),
+            calendar_rule_status calendar_rule_status_enum NOT NULL DEFAULT 'Active',
+            calendar_event_category VARCHAR(100),
+            weight INTEGER DEFAULT 0,
+            duration INTEGER DEFAULT 0,
+            topic_id UUID,
+            user_id UUID,
+            create_meeting_link BOOLEAN DEFAULT FALSE,
             owner_id UUID,
             parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
-            created_by UUID,
-            modified_on TIMESTAMPTZ,
-            modified_by UUID
-        );
-
-        -- 3. Artefacts Table
-        CREATE TABLE IF NOT EXISTS artefacts (
-            id UUID PRIMARY KEY,
-            url TEXT,
-            title VARCHAR(250),
-            description TEXT,
-            meta_data JSONB DEFAULT '{}'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            mime_type VARCHAR(100),
-            file_name VARCHAR(250),
-            file_size NUMERIC(18, 2),
-            status artefact_status_enum NOT NULL DEFAULT 'Active',
-            sha1 VARCHAR(100),
-            model TEXT,
-            template TEXT,
-            csv TEXT,
-            change_set JSONB DEFAULT '[]'::jsonb,
-            comments JSONB DEFAULT '[]'::jsonb,
-            video_links JSONB DEFAULT '[]'::jsonb,
-            data_attributes JSONB DEFAULT '[]'::jsonb,
-            published_on TIMESTAMPTZ,
-            public_urls TEXT[] DEFAULT '{}'::text[],
-            thumbnails TEXT[] DEFAULT '{}'::text[],
-            owner_id UUID,
-            parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
+            created_on TIMESTAMPTZ,
             created_by UUID,
             modified_on TIMESTAMPTZ,
             modified_by UUID
@@ -554,77 +395,46 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 
 
 # -----------------------------------------------------------------------------
-# Database Upsert Operations
+# Database Upsert Operation
 # -----------------------------------------------------------------------------
 
 
-def upsert_tag(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert an ArtefactTag."""
-    fields = extract_tag_fields(doc)
+def upsert_calendar_rule(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert a CalendarRule document."""
+    fields = extract_calendar_rule_fields(doc)
     sql = """
-        INSERT INTO artefact_tags (
-            id, name, predefined, csn, meta, status,
-            owner_id, parent_id, created_on, created_by, modified_on, modified_by
+        INSERT INTO calendar_rules (
+            id,
+            title,
+            cron_expression,
+            calendar_rule_status,
+            calendar_event_category,
+            weight,
+            duration,
+            topic_id,
+            user_id,
+            create_meeting_link,
+            owner_id,
+            parent_id,
+            created_on,
+            created_by,
+            modified_on,
+            modified_by
         ) VALUES (
-            %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            predefined = EXCLUDED.predefined,
-            csn = EXCLUDED.csn,
-            meta = EXCLUDED.meta,
-            status = EXCLUDED.status,
-            owner_id = EXCLUDED.owner_id,
-            parent_id = EXCLUDED.parent_id,
-            created_on = EXCLUDED.created_on,
-            created_by = EXCLUDED.created_by,
-            modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by
-        RETURNING (xmax = 0);
-    """
-    cur.execute(sql, fields)
-    row = cur.fetchone()
-    inserted = bool(row[0]) if row else False
-    return UpsertResult(record_id=fields[0], inserted=inserted)
-
-
-def upsert_artefact(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert an Artefact."""
-    fields = extract_artefact_fields(doc)
-    sql = """
-        INSERT INTO artefacts (
-            id, url, title, description, meta_data, tags, mime_type, file_name, file_size,
-            status, sha1, model, template, csv, change_set, comments, video_links,
-            data_attributes, published_on, public_urls, thumbnails,
-            owner_id, parent_id, created_on, created_by, modified_on, modified_by
-        ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
-        )
-        ON CONFLICT (id) DO UPDATE SET
-            url = EXCLUDED.url,
             title = EXCLUDED.title,
-            description = EXCLUDED.description,
-            meta_data = EXCLUDED.meta_data,
-            tags = EXCLUDED.tags,
-            mime_type = EXCLUDED.mime_type,
-            file_name = EXCLUDED.file_name,
-            file_size = EXCLUDED.file_size,
-            status = EXCLUDED.status,
-            sha1 = EXCLUDED.sha1,
-            model = EXCLUDED.model,
-            template = EXCLUDED.template,
-            csv = EXCLUDED.csv,
-            change_set = EXCLUDED.change_set,
-            comments = EXCLUDED.comments,
-            video_links = EXCLUDED.video_links,
-            data_attributes = EXCLUDED.data_attributes,
-            published_on = EXCLUDED.published_on,
-            public_urls = EXCLUDED.public_urls,
-            thumbnails = EXCLUDED.thumbnails,
+            cron_expression = EXCLUDED.cron_expression,
+            calendar_rule_status = EXCLUDED.calendar_rule_status,
+            calendar_event_category = EXCLUDED.calendar_event_category,
+            weight = EXCLUDED.weight,
+            duration = EXCLUDED.duration,
+            topic_id = EXCLUDED.topic_id,
+            user_id = EXCLUDED.user_id,
+            create_meeting_link = EXCLUDED.create_meeting_link,
             owner_id = EXCLUDED.owner_id,
             parent_id = EXCLUDED.parent_id,
             created_on = EXCLUDED.created_on,
@@ -708,7 +518,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for artefact tags and artefacts."""
+    """Run the end-to-end migration for CalendarRules."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -718,20 +528,26 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collections=({cfg.tags_collection}, {cfg.artefacts_collection})"
+            f"collection={cfg.calendar_rules_collection}"
         )
-        print("[1/5] Fetching RavenDB documents...")
-        tag_docs = raven_query_collection(
-            requests_session, cfg, cfg.tags_collection
-        )
-        art_docs = raven_query_collection(
-            requests_session, cfg, cfg.artefacts_collection
-        )
-        print(
-            f"Fetched artefact_tags={len(tag_docs)}, artefacts={len(art_docs)}"
+        print("[1/4] Fetching RavenDB documents...")
+        rule_docs = raven_query_collection(
+            requests_session, cfg, cfg.calendar_rules_collection
         )
 
-        print("[2/5] Connecting PostgreSQL...")
+        # Fallback to singular name if 0 docs fetched with default collection name
+        if not rule_docs and cfg.calendar_rules_collection == "CalendarRules":
+            try:
+                alt_docs = raven_query_collection(requests_session, cfg, "CalendarRule")
+                if alt_docs:
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'CalendarRule'.")
+                    rule_docs = alt_docs
+            except Exception:
+                pass
+
+        print(f"Fetched calendar_rules={len(rule_docs)}")
+
+        print("[2/4] Connecting PostgreSQL...")
         print(
             f"PostgreSQL target: host={cfg.pg_host}, port={cfg.pg_port}, "
             f"db={cfg.pg_db}, user={cfg.pg_user}"
@@ -748,34 +564,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_tags = 0
-        new_tags = 0
-        loaded_arts = 0
-        new_arts = 0
+        loaded_rules = 0
+        new_rules = 0
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/5] Ensuring target schema...")
+                print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/5] Upserting artefact tags...")
-                for d in tag_docs:
-                    res = upsert_tag(cur, d)
-                    loaded_tags += 1
-                    new_tags += int(res.inserted)
-
-                print("[5/5] Upserting artefacts...")
-                for d in art_docs:
-                    res = upsert_artefact(cur, d)
-                    loaded_arts += 1
-                    new_arts += int(res.inserted)
-
-        # Post-load verification counts
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM artefact_tags")
-            total_tags = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM artefacts")
-            total_artefacts = int(cur.fetchone()[0])
+                print("[4/4] Upserting calendar rules...")
+                for d in rule_docs:
+                    res = upsert_calendar_rule(cur, d)
+                    loaded_rules += 1
+                    new_rules += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -784,8 +585,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "tags_collection": cfg.tags_collection,
-                "artefacts_collection": cfg.artefacts_collection,
+                "collection": cfg.calendar_rules_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -794,22 +594,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "tags_processed": loaded_tags,
-                "new_tags_inserted": new_tags,
-                "artefacts_processed": loaded_arts,
-                "new_artefacts_inserted": new_arts,
-            },
-            "post_load_counts": {
-                "artefact_tags": total_tags,
-                "artefacts": total_artefacts,
+                "calendar_rules_processed": loaded_rules,
+                "new_calendar_rules_inserted": new_rules,
             },
         }
 
         print("Migration completed.")
-        print(f"artefacts_tags_processed: {loaded_tags}")
-        print(f"new_artefacts_tags_inserted: {new_tags}")
-        print(f"artefacts_processed: {loaded_arts}")
-        print(f"new_artefacts_inserted: {new_arts}")
+        print(f"calendar_rules_processed: {loaded_rules}")
+        print(f"new_calendar_rules_inserted: {new_rules}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

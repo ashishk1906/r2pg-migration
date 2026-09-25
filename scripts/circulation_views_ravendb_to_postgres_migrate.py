@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract Assessments and AssessmentTags data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
+Extract CirculationViews data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL types,
 and load into PostgreSQL.
 
-Target tables:
-- assessment_tags
-- assessments
+Target table:
+- circulation_views
 """
 
 from __future__ import annotations
@@ -20,14 +19,16 @@ from pathlib import Path
 import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 import psycopg2
-from psycopg2.extras import Json
 import requests
 
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
+
+UUID_NAMESPACE_CIRCULATION_VIEWS = uuid.UUID("6ba7b819-9dad-11d1-80b4-00c04fd430c8")
 
 
 # -----------------------------------------------------------------------------
@@ -47,8 +48,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    assessments_collection: str
-    tags_collection: str
+    circulation_views_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -92,7 +92,7 @@ def parse_args() -> Config:
         load_env_file(root_env)
 
     parser = argparse.ArgumentParser(
-        description="Migrate Assessments and AssessmentTags from RavenDB to PostgreSQL"
+        description="Migrate CirculationViews from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -113,14 +113,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--assessments-collection",
-        default=os.getenv("ASSESSMENTS_COLLECTION", "Assessments"),
-        help="RavenDB collection name for assessments (default: Assessments)",
-    )
-    parser.add_argument(
-        "--tags-collection",
-        default=os.getenv("ASSESSMENT_TAGS_COLLECTION", "AssessmentTags"),
-        help="RavenDB collection name for assessment tags (default: AssessmentTags)",
+        "--circulation-views-collection",
+        default=os.getenv("CIRCULATION_VIEWS_COLLECTION", "CirculationViews"),
+        help="RavenDB collection name for circulation views (default: CirculationViews)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -187,8 +182,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        assessments_collection=args.assessments_collection,
-        tags_collection=args.tags_collection,
+        circulation_views_collection=args.circulation_views_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -225,42 +219,6 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any) -> bool:
-    if val is None:
-        return False
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() in {"true", "1", "yes"}
-
-
-def clean_int(val: Any) -> Optional[int]:
-    if val is None:
-        return None
-    try:
-        return int(float(str(val).strip()))
-    except (ValueError, TypeError):
-        return None
-
-
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
-    if raw_val is None:
-        return []
-    if isinstance(raw_val, list):
-        return [str(item).strip() for item in raw_val if str(item).strip()]
-    if isinstance(raw_val, str):
-        cleaned = raw_val.strip()
-        return [cleaned] if cleaned else []
-    return [str(raw_val)]
-
-
-def as_json(value: Any) -> Optional[Json]:
-    """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
-    if value is None:
-        return None
-    return Json(value)
-
-
 def parse_iso_timestamp(val: Any) -> Optional[datetime]:
     """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
     if not val:
@@ -294,289 +252,103 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 
 
 # -----------------------------------------------------------------------------
-# Enum Mappings (Exact match to C# Enums)
-# -----------------------------------------------------------------------------
-
-# TagStatusEnum: Unknown = 0, Active = 1, Disabled = 99
-TAG_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "disabled": "Disabled",
-    "inactive": "Disabled",
-}
-
-
-def map_tag_status(val: Any) -> str:
-    if val is None:
-        return "Active"
-    if isinstance(val, int):
-        return TAG_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return TAG_STATUS_MAP.get(int(s), "Active")
-    return TAG_STATUS_MAP.get(s.lower(), "Active")
-
-
-# AssessmentStatusEnum: Unknown=0, Active=1, WIP=40, Published=50, Archived=80, Disabled=99
-ASSESSMENT_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    40: "Wip",
-    50: "Published",
-    80: "Archived",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "wip": "Wip",
-    "published": "Published",
-    "archived": "Archived",
-    "disabled": "Disabled",
-    "inactive": "Disabled",
-}
-
-
-def map_assessment_status(val: Any) -> str:
-    if val is None:
-        return "Active"
-    if isinstance(val, int):
-        return ASSESSMENT_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return ASSESSMENT_STATUS_MAP.get(int(s), "Active")
-    norm = s.lower().replace(" ", "").replace("_", "")
-    return ASSESSMENT_STATUS_MAP.get(norm, "Active")
-
-
-# -----------------------------------------------------------------------------
-# Document Field Extractors (Only RavenDB fields, no metadata columns)
+# Document Field Extractor (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for assessment_tags table."""
+def extract_circulation_view_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for circulation_views table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    tag_id = clean_uuid(raw_id)
-    if not tag_id:
-        raise ValueError(f"AssessmentTag missing valid UUID: {raw_id}")
-
-    name = clean_str(doc.get("Name"), 150)
-    predefined = clean_bool(doc.get("Predefined"))
-    csn = clean_str(doc.get("CSN"), 100)
-    meta = as_json(doc.get("Meta") or {})
-    status = map_tag_status(doc.get("Status"))
-
-    owner_id = clean_uuid(doc.get("OwnerId"))
-    parent_id = clean_uuid(doc.get("ParentId"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
-    created_by = clean_uuid(doc.get("CreatedBy"))
-    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
-    modified_by = clean_uuid(doc.get("ModifiedBy"))
-
-    return (
-        tag_id,
-        name,
-        predefined,
-        csn,
-        meta,
-        status,
-        owner_id,
-        parent_id,
-        created_on,
-        created_by,
-        modified_on,
-        modified_by,
-    )
-
-
-def extract_assessment_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for assessments table."""
-    metadata = doc.get("@metadata") or {}
-    raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    art_id = clean_uuid(raw_id)
-    if not art_id:
-        raise ValueError(f"Assessment missing valid UUID: {raw_id}")
-
-    total_marks = clean_int(doc.get("TotalMarks"))
-    description = clean_str(doc.get("Description"))
-    subject = clean_str(doc.get("Subject"), 150)
-    subject_code = clean_str(doc.get("SubjectCode"), 50)
-    duration = clean_int(doc.get("Duration"))
-
-    sections = as_json(doc.get("Sections") if isinstance(doc.get("Sections"), list) else [])
-    status = map_assessment_status(doc.get("Status"))
-    multiple_attempts = clean_bool(doc.get("MultipleAttempts"))
-    tags = clean_string_list(doc.get("Tags"))
+    circulation_id = None
+    if raw_id:
+        clean_raw = str(raw_id).strip()
+        last_part = clean_raw.rsplit("/", 1)[-1]
+        if UUID_RE.fullmatch(last_part):
+            circulation_id = last_part.lower()
+        elif UUID_RE.fullmatch(clean_raw):
+            circulation_id = clean_raw.lower()
+        else:
+            circulation_id = str(
+                uuid.uuid5(UUID_NAMESPACE_CIRCULATION_VIEWS, clean_raw)
+            ).lower()
+    if not circulation_id:
+        raise ValueError(f"CirculationView missing valid ID: {raw_id}")
 
     owner_id = clean_uuid(doc.get("OwnerId"))
-    parent_id = clean_uuid(doc.get("ParentId"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
-    created_by = clean_uuid(doc.get("CreatedBy"))
-    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
-    modified_by = clean_uuid(doc.get("ModifiedBy"))
+    tracking_id = clean_str(doc.get("TrackingId"), 100)
+    issued_on = parse_iso_timestamp(doc.get("IssuedOn"))
+    received_on = parse_iso_timestamp(doc.get("ReceivedOn"))
+    due_on = parse_iso_timestamp(doc.get("DueOn"))
+    reissued_on = parse_iso_timestamp(doc.get("ReissuedOn"))
+    issued_to = clean_str(doc.get("IssuedTo"), 100)
 
     return (
-        art_id,
-        total_marks,
-        description,
-        subject,
-        subject_code,
-        duration,
-        sections,
-        status,
-        multiple_attempts,
-        tags,
+        circulation_id,
         owner_id,
-        parent_id,
-        created_on,
-        created_by,
-        modified_on,
-        modified_by,
+        tracking_id,
+        issued_on,
+        received_on,
+        due_on,
+        reissued_on,
+        issued_to,
     )
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup (Only primary keys, no secondary indexes)
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes, no views)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums, assessment_tags and assessments tables."""
+    """Create target circulation_views table without secondary indexes or views."""
     cur.execute(
         """
-        -- 1. Create Enums
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tag_status_enum') THEN
-                CREATE TYPE tag_status_enum AS ENUM (
-                    'Unknown',
-                    'Active',
-                    'Disabled'
-                );
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'assessment_status_enum') THEN
-                CREATE TYPE assessment_status_enum AS ENUM (
-                    'Unknown',
-                    'Active',
-                    'Wip',
-                    'Published',
-                    'Archived',
-                    'Disabled'
-                );
-            END IF;
-        END $$;
-
-        -- 2. AssessmentTags Table (No secondary indexes)
-        CREATE TABLE IF NOT EXISTS assessment_tags (
+        CREATE TABLE IF NOT EXISTS circulation_views (
             id UUID PRIMARY KEY,
-            name VARCHAR(150),
-            predefined BOOLEAN DEFAULT FALSE,
-            csn VARCHAR(100),
-            meta JSONB DEFAULT '{}'::jsonb,
-            status tag_status_enum NOT NULL DEFAULT 'Active',
             owner_id UUID,
-            parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
-            created_by UUID,
-            modified_on TIMESTAMPTZ,
-            modified_by UUID
-        );
-
-        -- 3. Assessments Table (No secondary indexes)
-        CREATE TABLE IF NOT EXISTS assessments (
-            id UUID PRIMARY KEY,
-            total_marks INT,
-            description TEXT,
-            subject VARCHAR(150),
-            subject_code VARCHAR(50),
-            duration INT,
-            sections JSONB DEFAULT '[]'::jsonb,
-            status assessment_status_enum NOT NULL DEFAULT 'Active',
-            multiple_attempts BOOLEAN DEFAULT FALSE,
-            tags TEXT[] DEFAULT '{}'::text[],
-            owner_id UUID,
-            parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
-            created_by UUID,
-            modified_on TIMESTAMPTZ,
-            modified_by UUID
+            tracking_id VARCHAR(100),
+            issued_on TIMESTAMPTZ,
+            received_on TIMESTAMPTZ,
+            due_on TIMESTAMPTZ,
+            reissued_on TIMESTAMPTZ,
+            issued_to VARCHAR(100)
         );
         """
     )
 
 
 # -----------------------------------------------------------------------------
-# Database Upsert Operations
+# Database Upsert Operation
 # -----------------------------------------------------------------------------
 
 
-def upsert_assessment_tag(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert an AssessmentTag."""
-    fields = extract_tag_fields(doc)
+def upsert_circulation_view(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert a CirculationView document."""
+    fields = extract_circulation_view_fields(doc)
     sql = """
-        INSERT INTO assessment_tags (
-            id, name, predefined, csn, meta, status,
-            owner_id, parent_id, created_on, created_by, modified_on, modified_by
+        INSERT INTO circulation_views (
+            id,
+            owner_id,
+            tracking_id,
+            issued_on,
+            received_on,
+            due_on,
+            reissued_on,
+            issued_to
         ) VALUES (
-            %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            predefined = EXCLUDED.predefined,
-            csn = EXCLUDED.csn,
-            meta = EXCLUDED.meta,
-            status = EXCLUDED.status,
             owner_id = EXCLUDED.owner_id,
-            parent_id = EXCLUDED.parent_id,
-            created_on = EXCLUDED.created_on,
-            created_by = EXCLUDED.created_by,
-            modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by
-        RETURNING (xmax = 0);
-    """
-    cur.execute(sql, fields)
-    row = cur.fetchone()
-    inserted = bool(row[0]) if row else False
-    return UpsertResult(record_id=fields[0], inserted=inserted)
-
-
-def upsert_assessment(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert an Assessment."""
-    fields = extract_assessment_fields(doc)
-    sql = """
-        INSERT INTO assessments (
-            id, total_marks, description, subject, subject_code, duration,
-            sections, status, multiple_attempts, tags,
-            owner_id, parent_id, created_on, created_by, modified_on, modified_by
-        ) VALUES (
-            %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
-        )
-        ON CONFLICT (id) DO UPDATE SET
-            total_marks = EXCLUDED.total_marks,
-            description = EXCLUDED.description,
-            subject = EXCLUDED.subject,
-            subject_code = EXCLUDED.subject_code,
-            duration = EXCLUDED.duration,
-            sections = EXCLUDED.sections,
-            status = EXCLUDED.status,
-            multiple_attempts = EXCLUDED.multiple_attempts,
-            tags = EXCLUDED.tags,
-            owner_id = EXCLUDED.owner_id,
-            parent_id = EXCLUDED.parent_id,
-            created_on = EXCLUDED.created_on,
-            created_by = EXCLUDED.created_by,
-            modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by
+            tracking_id = EXCLUDED.tracking_id,
+            issued_on = EXCLUDED.issued_on,
+            received_on = EXCLUDED.received_on,
+            due_on = EXCLUDED.due_on,
+            reissued_on = EXCLUDED.reissued_on,
+            issued_to = EXCLUDED.issued_to
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -654,7 +426,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for assessment tags and assessments."""
+    """Run the end-to-end migration for CirculationViews."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -664,20 +436,28 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collections=({cfg.tags_collection}, {cfg.assessments_collection})"
+            f"collection={cfg.circulation_views_collection}"
         )
-        print("[1/5] Fetching RavenDB documents...")
-        tag_docs = raven_query_collection(
-            requests_session, cfg, cfg.tags_collection
-        )
-        assessment_docs = raven_query_collection(
-            requests_session, cfg, cfg.assessments_collection
-        )
-        print(
-            f"Fetched assessment_tags={len(tag_docs)}, assessments={len(assessment_docs)}"
+        print("[1/4] Fetching RavenDB documents...")
+        circulation_docs = raven_query_collection(
+            requests_session, cfg, cfg.circulation_views_collection
         )
 
-        print("[2/5] Connecting PostgreSQL...")
+        # Fallback to singular name if 0 docs fetched with default collection name
+        if not circulation_docs and cfg.circulation_views_collection == "CirculationViews":
+            try:
+                alt_docs = raven_query_collection(
+                    requests_session, cfg, "CirculationView"
+                )
+                if alt_docs:
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'CirculationView'.")
+                    circulation_docs = alt_docs
+            except Exception:
+                pass
+
+        print(f"Fetched circulation_views={len(circulation_docs)}")
+
+        print("[2/4] Connecting PostgreSQL...")
         print(
             f"PostgreSQL target: host={cfg.pg_host}, port={cfg.pg_port}, "
             f"db={cfg.pg_db}, user={cfg.pg_user}"
@@ -694,34 +474,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_tags = 0
-        new_tags = 0
-        loaded_ass = 0
-        new_ass = 0
+        loaded_views = 0
+        new_views = 0
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/5] Ensuring target schema...")
+                print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/5] Upserting assessment tags...")
-                for d in tag_docs:
-                    res = upsert_assessment_tag(cur, d)
-                    loaded_tags += 1
-                    new_tags += int(res.inserted)
-
-                print("[5/5] Upserting assessments...")
-                for d in assessment_docs:
-                    res = upsert_assessment(cur, d)
-                    loaded_ass += 1
-                    new_ass += int(res.inserted)
-
-        # Post-load verification counts
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM assessment_tags")
-            total_tags = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM assessments")
-            total_assessments = int(cur.fetchone()[0])
+                print("[4/4] Upserting circulation views...")
+                for d in circulation_docs:
+                    res = upsert_circulation_view(cur, d)
+                    loaded_views += 1
+                    new_views += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -730,8 +495,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "tags_collection": cfg.tags_collection,
-                "assessments_collection": cfg.assessments_collection,
+                "collection": cfg.circulation_views_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -740,22 +504,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "tags_processed": loaded_tags,
-                "new_tags_inserted": new_tags,
-                "assessments_processed": loaded_ass,
-                "new_assessments_inserted": new_ass,
-            },
-            "post_load_counts": {
-                "assessment_tags": total_tags,
-                "assessments": total_assessments,
+                "circulation_views_processed": loaded_views,
+                "new_circulation_views_inserted": new_views,
             },
         }
 
         print("Migration completed.")
-        print(f"assessment_tags_processed: {loaded_tags}")
-        print(f"new_assessment_tags_inserted: {new_tags}")
-        print(f"assessments_processed: {loaded_ass}")
-        print(f"new_assessments_inserted: {new_ass}")
+        print(f"circulation_views_processed: {loaded_views}")
+        print(f"new_circulation_views_inserted: {new_views}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

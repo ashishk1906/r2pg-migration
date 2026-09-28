@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract LedgerAccountViews data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL types and ENUMs,
+Extract VoucherViews data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
 and load into PostgreSQL.
 
 Target table:
-- ledger_account_views
+- voucher_views
 """
 
 from __future__ import annotations
@@ -13,13 +13,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
 import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
-import uuid
 
 import psycopg2
 from psycopg2.extras import Json
@@ -28,37 +28,6 @@ import requests
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
-
-UUID_NAMESPACE_LEDGER_ACCOUNT_VIEWS = uuid.UUID("6ba7b812-9dad-11d1-80b4-00c04fd430c8")
-
-LEDGER_STATUS_MAP: Dict[Any, str] = {
-    "active": "Active",
-    "disabled": "Disabled",
-    "archived": "Archived",
-    "unknown": "Unknown",
-    "1": "Active",
-    "99": "Disabled",
-    1: "Active",
-    99: "Disabled",
-}
-
-NATURE_OF_ACCOUNTS_MAP: Dict[str, str] = {
-    "inherit": "Inherit",
-    "assets": "Assets",
-    "asset": "Assets",
-    "liabilities": "Liabilities",
-    "liability": "Liabilities",
-    "income": "Income",
-    "expenses": "Expenses",
-    "expense": "Expenses",
-    "unknown": "Unknown",
-}
-
-LEDGER_TYPE_MAP: Dict[str, str] = {
-    "ledger": "Ledger",
-    "group": "Group",
-    "unknown": "Unknown",
-}
 
 
 # -----------------------------------------------------------------------------
@@ -78,7 +47,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    ledger_account_views_collection: str
+    vouchers_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -117,12 +86,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate LedgerAccountViews from RavenDB to PostgreSQL"
+        description="Migrate VoucherViews from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -143,9 +117,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--ledger-account-views-collection",
-        default=os.getenv("LEDGER_ACCOUNT_VIEWS_COLLECTION", "LedgerAccountViews"),
-        help="RavenDB collection name for ledger account views (default: LedgerAccountViews)",
+        "--vouchers-collection",
+        default=os.getenv("VOUCHERS_COLLECTION", "VoucherViews"),
+        help="RavenDB collection name for vouchers (default: VoucherViews)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -188,11 +162,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -212,7 +190,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        ledger_account_views_collection=args.ledger_account_views_collection,
+        vouchers_collection=args.vouchers_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -249,30 +227,106 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def map_ledger_status(raw_val: Any) -> str:
-    """Map status string/int to ledger_account_status_enum."""
+def clean_decimal(val: Any) -> Optional[Decimal]:
+    if val is None:
+        return None
+    try:
+        return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def clean_string_list(raw_val: Any) -> List[str]:
+    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
     if raw_val is None:
+        return []
+    if isinstance(raw_val, list):
+        return [str(item).strip() for item in raw_val if str(item).strip()]
+    if isinstance(raw_val, str):
+        cleaned = raw_val.strip()
+        return [cleaned] if cleaned else []
+    return [str(raw_val)]
+
+
+def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+    """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
+    if value is None:
+        return Json(default_val) if default_val is not None else None
+    return Json(value)
+
+
+def parse_iso_timestamp(val: Any) -> Optional[datetime]:
+    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
+    if not val:
+        return None
+    text = str(val).strip()
+    if not text:
+        return None
+
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    if "." in normalized:
+        base, frac = normalized.split(".", 1)
+        tz_pos = max(frac.find("+"), frac.find("-"))
+        if tz_pos >= 0:
+            frac_part = frac[:tz_pos]
+            tz_part = frac[tz_pos:]
+        else:
+            frac_part = frac
+            tz_part = ""
+        digits = "".join(ch for ch in frac_part if ch.isdigit())[:6]
+        normalized = f"{base}.{digits}{tz_part}" if digits else f"{base}{tz_part}"
+    if "+" not in normalized[10:] and "-" not in normalized[10:]:
+        normalized = f"{normalized}+00:00"
+
+    try:
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+# -----------------------------------------------------------------------------
+# Enum Mappings
+# -----------------------------------------------------------------------------
+
+VOUCHER_TYPE_MAP: Dict[str, str] = {
+    "expense": "Expense",
+    "income": "Income",
+    "journal": "Journal",
+    "contra": "Contra",
+    "payment": "Payment",
+    "receipt": "Receipt",
+}
+
+VOUCHER_STATUS_MAP: Dict[Any, str] = {
+    0: "Unknown",
+    1: "Active",
+    99: "Disabled",
+    "unknown": "Unknown",
+    "active": "Active",
+    "disabled": "Disabled",
+    "inactive": "Disabled",
+}
+
+
+def map_voucher_type(val: Any) -> str:
+    if val is None:
+        return "Expense"
+    s = str(val).strip()
+    return VOUCHER_TYPE_MAP.get(s.lower(), s.capitalize() if s else "Expense")
+
+
+def map_voucher_status(val: Any) -> str:
+    if val is None:
         return "Active"
-    if isinstance(raw_val, int):
-        return LEDGER_STATUS_MAP.get(raw_val, "Active")
-    norm = str(raw_val).strip().lower()
-    return LEDGER_STATUS_MAP.get(norm, "Active")
-
-
-def map_nature_of_accounts(raw_val: Any) -> str:
-    """Map nature of accounts string to nature_of_accounts_enum."""
-    if raw_val is None:
-        return "Inherit"
-    norm = str(raw_val).strip().lower()
-    return NATURE_OF_ACCOUNTS_MAP.get(norm, "Inherit")
-
-
-def map_ledger_type(raw_val: Any) -> str:
-    """Map ledger type string to ledger_type_enum."""
-    if raw_val is None:
-        return "Ledger"
-    norm = str(raw_val).strip().lower()
-    return LEDGER_TYPE_MAP.get(norm, "Ledger")
+    if isinstance(val, int):
+        return VOUCHER_STATUS_MAP.get(val, "Active")
+    s = str(val).strip()
+    if s.isdigit():
+        return VOUCHER_STATUS_MAP.get(int(s), "Active")
+    return VOUCHER_STATUS_MAP.get(s.lower(), "Active")
 
 
 # -----------------------------------------------------------------------------
@@ -280,94 +334,121 @@ def map_ledger_type(raw_val: Any) -> str:
 # -----------------------------------------------------------------------------
 
 
-def extract_ledger_account_view_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for ledger_account_views table."""
+def extract_voucher_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for voucher_views table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    ledger_account_id = clean_uuid(raw_id)
-    if not ledger_account_id and raw_id:
-        ledger_account_id = str(
-            uuid.uuid5(UUID_NAMESPACE_LEDGER_ACCOUNT_VIEWS, str(raw_id).strip())
-        ).lower()
-    if not ledger_account_id:
-        raise ValueError(f"LedgerAccountView missing valid ID: {raw_id}")
+    voucher_id = clean_uuid(raw_id)
+    if not voucher_id:
+        raise ValueError(f"VoucherView missing valid UUID: {raw_id}")
 
-    name = clean_str(doc.get("Name"), 255)
-    group_id = clean_uuid(doc.get("GroupId"))
-    group_name = clean_str(doc.get("GroupName"), 255)
     owner_id = clean_uuid(doc.get("OwnerId"))
-    owner_name = clean_str(doc.get("OwnerName"), 255)
-    owner_type = clean_str(doc.get("OwnerType"), 50)
-    ledger_type = map_ledger_type(doc.get("LedgerType"))
-    nature_of_accounts = map_nature_of_accounts(doc.get("NatureOfAccounts"))
-    status = map_ledger_status(doc.get("Status"))
+    description = clean_str(doc.get("Description"))
+    ref_no = clean_str(doc.get("RefNo"), 100)
+    voucher_no = clean_str(doc.get("VoucherNo"), 100)
+    voucher_type = map_voucher_type(doc.get("Type"))
+    date_val = parse_iso_timestamp(doc.get("Date"))
+
+    by_val = as_json(doc.get("By") if isinstance(doc.get("By"), list) else [], default_val=[])
+    to_val = as_json(doc.get("To") if isinstance(doc.get("To"), list) else [], default_val=[])
+    by_total = clean_decimal(doc.get("ByTotal"))
+    to_total = clean_decimal(doc.get("ToTotal"))
+
+    section_val = as_json(doc.get("Section") if isinstance(doc.get("Section"), dict) else {}, default_val={})
+    tags = clean_string_list(doc.get("Tags"))
+    status = map_voucher_status(doc.get("Status"))
+    created_on = parse_iso_timestamp(
+        doc.get("CreatedOn") or metadata.get("@last-modified")
+    ) or datetime.now(timezone.utc)
 
     return (
-        ledger_account_id,
-        name,
-        group_id,
-        group_name,
+        voucher_id,
         owner_id,
-        owner_name,
-        owner_type,
-        ledger_type,
-        nature_of_accounts,
+        description,
+        ref_no,
+        voucher_no,
+        voucher_type,
+        date_val,
+        by_val,
+        to_val,
+        by_total,
+        to_total,
+        section_val,
+        tags,
         status,
+        created_on,
     )
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup (Only primary key, no secondary indexes, no views)
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and ledger_account_views table without secondary indexes or views."""
+    """Create target enums and voucher_views table without secondary indexes."""
     cur.execute(
         """
+        -- 1. Create or extend Enums
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ledger_account_status_enum') THEN
-                CREATE TYPE ledger_account_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'voucher_type_enum') THEN
+                CREATE TYPE voucher_type_enum AS ENUM (
+                    'Expense',
+                    'Income',
+                    'Journal',
+                    'Contra',
+                    'Payment',
+                    'Receipt',
+                    'Unknown'
+                );
+            ELSE
+                BEGIN
+                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Contra';
+                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Payment';
+                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Receipt';
+                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Unknown';
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END;
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'voucher_status_enum') THEN
+                CREATE TYPE voucher_status_enum AS ENUM (
                     'Unknown',
                     'Active',
-                    'Disabled',
-                    'Archived'
+                    'Disabled'
                 );
-            END IF;
-
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'nature_of_accounts_enum') THEN
-                CREATE TYPE nature_of_accounts_enum AS ENUM (
-                    'Unknown',
-                    'Inherit',
-                    'Assets',
-                    'Liabilities',
-                    'Income',
-                    'Expenses'
-                );
-            END IF;
-
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ledger_type_enum') THEN
-                CREATE TYPE ledger_type_enum AS ENUM (
-                    'Unknown',
-                    'Ledger',
-                    'Group'
-                );
+            ELSE
+                BEGIN
+                    ALTER TYPE voucher_status_enum ADD VALUE IF NOT EXISTS 'Unknown';
+                EXCEPTION WHEN OTHERS THEN
+                    NULL;
+                END;
             END IF;
         END $$;
 
-        CREATE TABLE IF NOT EXISTS ledger_account_views (
+        -- 2. Create Target Table (No secondary indexes)
+        CREATE TABLE IF NOT EXISTS voucher_views (
             id UUID PRIMARY KEY,
-            name VARCHAR(255),
-            group_id UUID,
-            group_name VARCHAR(255),
             owner_id UUID,
-            owner_name VARCHAR(255),
-            owner_type VARCHAR(50),
-            ledger_type ledger_type_enum NOT NULL DEFAULT 'Ledger',
-            nature_of_accounts nature_of_accounts_enum NOT NULL DEFAULT 'Inherit',
-            status ledger_account_status_enum NOT NULL DEFAULT 'Active'
+            description TEXT,
+            ref_no VARCHAR(100),
+            voucher_no VARCHAR(100),
+            type voucher_type_enum NOT NULL DEFAULT 'Expense',
+            date TIMESTAMPTZ,
+            "by" JSONB DEFAULT '[]'::jsonb,
+            "to" JSONB DEFAULT '[]'::jsonb,
+            by_total NUMERIC(18, 2),
+            to_total NUMERIC(18, 2),
+            section JSONB DEFAULT '{}'::jsonb,
+            tags TEXT[] DEFAULT '{}'::text[],
+            status voucher_status_enum NOT NULL DEFAULT 'Active',
+            created_on TIMESTAMPTZ NOT NULL
         );
+
+        -- Backward-compatibility view for case-insensitive access
+        CREATE OR REPLACE VIEW voucherviews AS SELECT * FROM voucher_views;
         """
     )
 
@@ -377,36 +458,32 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_ledger_account_view(
-    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
-) -> UpsertResult:
-    """Idempotently upsert a LedgerAccountView document."""
-    fields = extract_ledger_account_view_fields(doc)
+def upsert_voucher_view(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
+    """Idempotently upsert a VoucherView document."""
+    fields = extract_voucher_fields(doc)
     sql = """
-        INSERT INTO ledger_account_views (
-            id,
-            name,
-            group_id,
-            group_name,
-            owner_id,
-            owner_name,
-            owner_type,
-            ledger_type,
-            nature_of_accounts,
-            status
+        INSERT INTO voucher_views (
+            id, owner_id, description, ref_no, voucher_no, type, date,
+            "by", "to", by_total, to_total, section, tags, status, created_on
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            group_id = EXCLUDED.group_id,
-            group_name = EXCLUDED.group_name,
             owner_id = EXCLUDED.owner_id,
-            owner_name = EXCLUDED.owner_name,
-            owner_type = EXCLUDED.owner_type,
-            ledger_type = EXCLUDED.ledger_type,
-            nature_of_accounts = EXCLUDED.nature_of_accounts,
-            status = EXCLUDED.status
+            description = EXCLUDED.description,
+            ref_no = EXCLUDED.ref_no,
+            voucher_no = EXCLUDED.voucher_no,
+            type = EXCLUDED.type,
+            date = EXCLUDED.date,
+            "by" = EXCLUDED."by",
+            "to" = EXCLUDED."to",
+            by_total = EXCLUDED.by_total,
+            to_total = EXCLUDED.to_total,
+            section = EXCLUDED.section,
+            tags = EXCLUDED.tags,
+            status = EXCLUDED.status,
+            created_on = EXCLUDED.created_on
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -484,7 +561,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for LedgerAccountViews."""
+    """Run the end-to-end migration for VoucherViews."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -494,26 +571,26 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.ledger_account_views_collection}"
+            f"collection={cfg.vouchers_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        ledger_docs = raven_query_collection(
-            requests_session, cfg, cfg.ledger_account_views_collection
+        voucher_docs = raven_query_collection(
+            requests_session, cfg, cfg.vouchers_collection
         )
 
-        # Fallback to singular name if 0 docs fetched with default collection name
-        if not ledger_docs and cfg.ledger_account_views_collection == "LedgerAccountViews":
-            try:
-                alt_docs = raven_query_collection(
-                    requests_session, cfg, "LedgerAccountView"
-                )
-                if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'LedgerAccountView'.")
-                    ledger_docs = alt_docs
-            except Exception:
-                pass
+        # Fallback to singular or alternate name if 0 docs fetched with default name
+        if not voucher_docs and cfg.vouchers_collection == "VoucherViews":
+            for alt_name in ("VoucherView", "Vouchers"):
+                try:
+                    alt_docs = raven_query_collection(requests_session, cfg, alt_name)
+                    if alt_docs:
+                        print(f"Fallback: Loaded {len(alt_docs)} docs from '{alt_name}'.")
+                        voucher_docs = alt_docs
+                        break
+                except Exception:
+                    pass
 
-        print(f"Fetched ledger_account_views={len(ledger_docs)}")
+        print(f"Fetched voucher_views={len(voucher_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -532,19 +609,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_views = 0
-        new_views = 0
+        loaded_vouchers = 0
+        new_vouchers = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting ledger account views...")
-                for d in ledger_docs:
-                    res = upsert_ledger_account_view(cur, d)
-                    loaded_views += 1
-                    new_views += int(res.inserted)
+                print("[4/4] Upserting voucher views...")
+                for d in voucher_docs:
+                    res = upsert_voucher_view(cur, d)
+                    loaded_vouchers += 1
+                    new_vouchers += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -553,7 +630,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.ledger_account_views_collection,
+                "collection": cfg.vouchers_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -562,14 +639,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "ledger_account_views_processed": loaded_views,
-                "new_ledger_account_views_inserted": new_views,
+                "vouchers_processed": loaded_vouchers,
+                "new_vouchers_inserted": new_vouchers,
             },
         }
 
         print("Migration completed.")
-        print(f"ledger_account_views_processed: {loaded_views}")
-        print(f"new_ledger_account_views_inserted: {new_views}")
+        print(f"vouchers_processed: {loaded_vouchers}")
+        print(f"new_vouchers_inserted: {new_vouchers}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

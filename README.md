@@ -76,7 +76,7 @@ A complete, production-ready demonstration of migrating school and fee managemen
 ```
 
 ### Key Architectural Decisions:
-- **Zero Hardcoded Schema Initialization**: PostgreSQL starts completely clean. The migration scripts (`scripts/*.py`) dynamically create all tables (`CREATE TABLE IF NOT EXISTS`) and populate real data.
+- **Zero Hardcoded Schema Initialization**: PostgreSQL starts completely clean. The migration scripts (`scripts/migrations/*.py`) dynamically create all tables (`CREATE TABLE IF NOT EXISTS`) and populate real data.
 - **Module Boundary Isolation**: C# code does not perform in-memory joins across disparate modules. Each module queries its respective table(s).
 - **Synchronous Cross-Module Reads**: Powered purely by PostgreSQL normal view `student_fee_summary_view`.
 - **JSONB Arrays with GIN Indexing**: Student enrollments and installment details are stored as JSONB arrays inside base tables, queried via `LATERAL jsonb_array_elements` and accelerated by GIN indexes.
@@ -297,13 +297,17 @@ CT-RPG/
 │   ├── Dockerfile                  # Python migration container
 │   ├── requirements.txt            # psycopg2-binary, requests, cryptography, requests-pkcs12
 │   ├── migrate_all.py              # Master migration CLI runner (loads data + applies view/triggers)
+│   ├── verify_raven_to_postgres.py # Data integrity verification script
+│   ├── verify-prerequisites.sh     # Playbook preflight gate
+│   ├── wait-for-api.sh             # API health check helper
 │   ├── certs/                      # RavenDB PKCS#12 client certificate (.pfx)
-│   ├── students_ravendb_to_postgres_migrate.py
-│   ├── fees_ravendb_to_postgres_migrate.py
-│   ├── courses_ravendb_to_postgres_migrate.py
-│   ├── exams_ravendb_to_postgres_migrate.py
-│   ├── personas_ravendb_to_postgres_migrate.py
-│   └── staffs_ravendb_to_postgres_migrate.py
+│   └── migrations/                 # Individual entity migration modules (30 modules)
+│       ├── students_ravendb_to_postgres_migrate.py
+│       ├── fees_ravendb_to_postgres_migrate.py
+│       ├── courses_ravendb_to_postgres_migrate.py
+│       ├── exams_ravendb_to_postgres_migrate.py
+│       ├── personas_ravendb_to_postgres_migrate.py
+│       └── ...
 │
 └── student-fee-poc/                # .NET Web API & PostgreSQL POC
     ├── README.md                   # Module-specific documentation

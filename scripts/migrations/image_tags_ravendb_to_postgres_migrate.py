@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract CalendarRules data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL ENUMs,
+Extract ImageTags data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONB,
 and load into PostgreSQL.
 
 Target table:
-- calendar_rules
+- image_tags
 """
 
 from __future__ import annotations
@@ -22,15 +22,16 @@ from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
 import psycopg2
+from psycopg2.extras import Json
 import requests
 
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
-UUID_NAMESPACE_CALENDAR_RULES = uuid.UUID("6ba7b81a-9dad-11d1-80b4-00c04fd430c8")
+UUID_NAMESPACE_IMAGE_TAGS = uuid.UUID("6ba7b816-9dad-11d1-80b4-00c04fd430c8")
 
-CALENDAR_RULE_STATUS_MAP: Dict[Any, str] = {
+IMAGE_TAG_STATUS_MAP: Dict[Any, str] = {
     0: "Unknown",
     1: "Active",
     99: "Disabled",
@@ -58,7 +59,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    calendar_rules_collection: str
+    image_tags_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -97,12 +98,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate CalendarRules from RavenDB to PostgreSQL"
+        description="Migrate ImageTags from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -123,9 +129,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--calendar-rules-collection",
-        default=os.getenv("CALENDAR_RULES_COLLECTION", "CalendarRules"),
-        help="RavenDB collection name for calendar rules (default: CalendarRules)",
+        "--image-tags-collection",
+        default=os.getenv("IMAGE_TAGS_COLLECTION", "ImageTags"),
+        help="RavenDB collection name for image tags (default: ImageTags)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -168,11 +174,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -192,7 +202,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        calendar_rules_collection=args.calendar_rules_collection,
+        image_tags_collection=args.image_tags_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -229,21 +239,19 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_int(val: Any, default: Optional[int] = 0) -> Optional[int]:
-    if val is None:
-        return default
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        return default
-
-
 def clean_bool(val: Any, default: bool = False) -> bool:
     if val is None:
         return default
     if isinstance(val, bool):
         return val
     return str(val).strip().lower() in {"true", "1", "yes"}
+
+
+def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+    """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
+    if value is None:
+        return Json(default_val) if default_val is not None else None
+    return Json(value)
 
 
 def parse_iso_timestamp(val: Any) -> Optional[datetime]:
@@ -278,16 +286,16 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-def map_calendar_rule_status(val: Any) -> str:
-    """Map status string/int to calendar_rule_status_enum."""
+def map_image_tag_status(val: Any) -> str:
+    """Map status string/int to image_tag_status_enum."""
     if val is None:
         return "Active"
     if isinstance(val, int):
-        return CALENDAR_RULE_STATUS_MAP.get(val, "Active")
+        return IMAGE_TAG_STATUS_MAP.get(val, "Active")
     s = str(val).strip()
     if s.isdigit():
-        return CALENDAR_RULE_STATUS_MAP.get(int(s), "Active")
-    return CALENDAR_RULE_STATUS_MAP.get(s.lower(), "Active")
+        return IMAGE_TAG_STATUS_MAP.get(int(s), "Active")
+    return IMAGE_TAG_STATUS_MAP.get(s.lower(), "Active")
 
 
 # -----------------------------------------------------------------------------
@@ -295,34 +303,34 @@ def map_calendar_rule_status(val: Any) -> str:
 # -----------------------------------------------------------------------------
 
 
-def extract_calendar_rule_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for calendar_rules table."""
+def extract_image_tag_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for image_tags table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    rule_id = None
+    tag_id = None
     if raw_id:
         clean_raw = str(raw_id).strip()
         last_part = clean_raw.rsplit("/", 1)[-1]
         if UUID_RE.fullmatch(last_part):
-            rule_id = last_part.lower()
+            tag_id = last_part.lower()
         elif UUID_RE.fullmatch(clean_raw):
-            rule_id = clean_raw.lower()
+            tag_id = clean_raw.lower()
         else:
-            rule_id = str(
-                uuid.uuid5(UUID_NAMESPACE_CALENDAR_RULES, clean_raw)
+            tag_id = str(
+                uuid.uuid5(UUID_NAMESPACE_IMAGE_TAGS, clean_raw)
             ).lower()
-    if not rule_id:
-        raise ValueError(f"CalendarRule missing valid ID: {raw_id}")
+    if not tag_id:
+        raise ValueError(f"ImageTag missing valid ID: {raw_id}")
 
-    title = clean_str(doc.get("Title"), 255)
-    cron_expression = clean_str(doc.get("CronExpression"), 100)
-    calendar_rule_status = map_calendar_rule_status(doc.get("CalendarRuleStatus"))
-    calendar_event_category = clean_str(doc.get("CalendarEventCategory"), 100)
-    weight = clean_int(doc.get("Weight"), default=0)
-    duration = clean_int(doc.get("Duration"), default=0)
-    topic_id = clean_uuid(doc.get("TopicId"))
-    user_id = clean_uuid(doc.get("UserId"))
-    create_meeting_link = clean_bool(doc.get("CreateMeetingLink"), default=False)
+    name = clean_str(doc.get("Name"), 255)
+    predefined = clean_bool(doc.get("Predefined"), default=False)
+    csn = clean_str(doc.get("CSN"), 50)
+    meta = as_json(
+        doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {},
+        default_val={},
+    )
+    status = map_image_tag_status(doc.get("Status"))
+
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
     created_on = parse_iso_timestamp(
@@ -333,16 +341,12 @@ def extract_calendar_rule_fields(doc: Dict[str, Any]) -> Tuple:
     modified_by = clean_uuid(doc.get("ModifiedBy"))
 
     return (
-        rule_id,
-        title,
-        cron_expression,
-        calendar_rule_status,
-        calendar_event_category,
-        weight,
-        duration,
-        topic_id,
-        user_id,
-        create_meeting_link,
+        tag_id,
+        name,
+        predefined,
+        csn,
+        meta,
+        status,
         owner_id,
         parent_id,
         created_on,
@@ -358,13 +362,13 @@ def extract_calendar_rule_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and calendar_rules table without secondary indexes or views."""
+    """Create target enums and image_tags table without secondary indexes or views."""
     cur.execute(
         """
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'calendar_rule_status_enum') THEN
-                CREATE TYPE calendar_rule_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'image_tag_status_enum') THEN
+                CREATE TYPE image_tag_status_enum AS ENUM (
                     'Unknown',
                     'Active',
                     'Disabled'
@@ -372,17 +376,13 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             END IF;
         END $$;
 
-        CREATE TABLE IF NOT EXISTS calendar_rules (
+        CREATE TABLE IF NOT EXISTS image_tags (
             id UUID PRIMARY KEY,
-            title VARCHAR(255),
-            cron_expression VARCHAR(100),
-            calendar_rule_status calendar_rule_status_enum NOT NULL DEFAULT 'Active',
-            calendar_event_category VARCHAR(100),
-            weight INTEGER DEFAULT 0,
-            duration INTEGER DEFAULT 0,
-            topic_id UUID,
-            user_id UUID,
-            create_meeting_link BOOLEAN DEFAULT FALSE,
+            name VARCHAR(255),
+            predefined BOOLEAN DEFAULT FALSE,
+            csn VARCHAR(50),
+            meta JSONB DEFAULT '{}'::jsonb,
+            status image_tag_status_enum NOT NULL DEFAULT 'Active',
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ,
@@ -399,23 +399,19 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_calendar_rule(
+def upsert_image_tag(
     cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
 ) -> UpsertResult:
-    """Idempotently upsert a CalendarRule document."""
-    fields = extract_calendar_rule_fields(doc)
+    """Idempotently upsert an ImageTag document."""
+    fields = extract_image_tag_fields(doc)
     sql = """
-        INSERT INTO calendar_rules (
+        INSERT INTO image_tags (
             id,
-            title,
-            cron_expression,
-            calendar_rule_status,
-            calendar_event_category,
-            weight,
-            duration,
-            topic_id,
-            user_id,
-            create_meeting_link,
+            name,
+            predefined,
+            csn,
+            meta,
+            status,
             owner_id,
             parent_id,
             created_on,
@@ -423,18 +419,14 @@ def upsert_calendar_rule(
             modified_on,
             modified_by
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            title = EXCLUDED.title,
-            cron_expression = EXCLUDED.cron_expression,
-            calendar_rule_status = EXCLUDED.calendar_rule_status,
-            calendar_event_category = EXCLUDED.calendar_event_category,
-            weight = EXCLUDED.weight,
-            duration = EXCLUDED.duration,
-            topic_id = EXCLUDED.topic_id,
-            user_id = EXCLUDED.user_id,
-            create_meeting_link = EXCLUDED.create_meeting_link,
+            name = EXCLUDED.name,
+            predefined = EXCLUDED.predefined,
+            csn = EXCLUDED.csn,
+            meta = EXCLUDED.meta,
+            status = EXCLUDED.status,
             owner_id = EXCLUDED.owner_id,
             parent_id = EXCLUDED.parent_id,
             created_on = EXCLUDED.created_on,
@@ -518,7 +510,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for CalendarRules."""
+    """Run the end-to-end migration for ImageTags."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -528,24 +520,24 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.calendar_rules_collection}"
+            f"collection={cfg.image_tags_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        rule_docs = raven_query_collection(
-            requests_session, cfg, cfg.calendar_rules_collection
+        image_tag_docs = raven_query_collection(
+            requests_session, cfg, cfg.image_tags_collection
         )
 
         # Fallback to singular name if 0 docs fetched with default collection name
-        if not rule_docs and cfg.calendar_rules_collection == "CalendarRules":
+        if not image_tag_docs and cfg.image_tags_collection == "ImageTags":
             try:
-                alt_docs = raven_query_collection(requests_session, cfg, "CalendarRule")
+                alt_docs = raven_query_collection(requests_session, cfg, "ImageTag")
                 if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'CalendarRule'.")
-                    rule_docs = alt_docs
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'ImageTag'.")
+                    image_tag_docs = alt_docs
             except Exception:
                 pass
 
-        print(f"Fetched calendar_rules={len(rule_docs)}")
+        print(f"Fetched image_tags={len(image_tag_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -564,19 +556,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_rules = 0
-        new_rules = 0
+        loaded_tags = 0
+        new_tags = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting calendar rules...")
-                for d in rule_docs:
-                    res = upsert_calendar_rule(cur, d)
-                    loaded_rules += 1
-                    new_rules += int(res.inserted)
+                print("[4/4] Upserting image tags...")
+                for d in image_tag_docs:
+                    res = upsert_image_tag(cur, d)
+                    loaded_tags += 1
+                    new_tags += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -585,7 +577,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.calendar_rules_collection,
+                "collection": cfg.image_tags_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -594,14 +586,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "calendar_rules_processed": loaded_rules,
-                "new_calendar_rules_inserted": new_rules,
+                "image_tags_processed": loaded_tags,
+                "new_image_tags_inserted": new_tags,
             },
         }
 
         print("Migration completed.")
-        print(f"calendar_rules_processed: {loaded_rules}")
-        print(f"new_calendar_rules_inserted: {new_rules}")
+        print(f"image_tags_processed: {loaded_tags}")
+        print(f"new_image_tags_inserted: {new_tags}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

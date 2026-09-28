@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract ContentTags data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONB,
+Extract Users data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
 and load into PostgreSQL.
 
 Target table:
-- content_tags
+- users
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from pathlib import Path
 import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
-import uuid
 
 import psycopg2
 from psycopg2.extras import Json
@@ -28,18 +27,6 @@ import requests
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
-
-UUID_NAMESPACE_CONTENT_TAGS = uuid.UUID("6ba7b818-9dad-11d1-80b4-00c04fd430c8")
-
-CONTENT_TAG_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "disabled": "Disabled",
-    "inactive": "Disabled",
-}
 
 
 # -----------------------------------------------------------------------------
@@ -59,7 +46,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    content_tags_collection: str
+    users_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -98,12 +85,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate ContentTags from RavenDB to PostgreSQL"
+        description="Migrate Users from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -124,9 +116,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--content-tags-collection",
-        default=os.getenv("CONTENT_TAGS_COLLECTION", "ContentTags"),
-        help="RavenDB collection name for content tags (default: ContentTags)",
+        "--users-collection",
+        default=os.getenv("USERS_COLLECTION", "Users"),
+        help="RavenDB collection name for users (default: Users)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -169,11 +161,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -193,7 +189,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        content_tags_collection=args.content_tags_collection,
+        users_collection=args.users_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -238,6 +234,18 @@ def clean_bool(val: Any, default: bool = False) -> bool:
     return str(val).strip().lower() in {"true", "1", "yes"}
 
 
+def clean_string_list(raw_val: Any) -> List[str]:
+    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+    if raw_val is None:
+        return []
+    if isinstance(raw_val, list):
+        return [str(item).strip() for item in raw_val if str(item).strip()]
+    if isinstance(raw_val, str):
+        cleaned = raw_val.strip()
+        return [cleaned] if cleaned else []
+    return [str(raw_val)]
+
+
 def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
@@ -277,16 +285,47 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-def map_content_tag_status(val: Any) -> str:
-    """Map status string/int to content_tag_status_enum."""
+# -----------------------------------------------------------------------------
+# Enum Mappings
+# -----------------------------------------------------------------------------
+
+USER_STATUS_MAP: Dict[Any, str] = {
+    0: "Unknown",
+    1: "Active",
+    99: "Disabled",
+    "unknown": "Unknown",
+    "active": "Active",
+    "disabled": "Disabled",
+    "inactive": "Disabled",
+}
+
+USER_GENDER_MAP: Dict[str, str] = {
+    "female": "Female",
+    "f": "Female",
+    "male": "Male",
+    "m": "Male",
+    "other": "Other",
+    "noinfo": "NoInfo",
+    "unknown": "NoInfo",
+}
+
+
+def map_user_status(val: Any) -> str:
     if val is None:
         return "Active"
     if isinstance(val, int):
-        return CONTENT_TAG_STATUS_MAP.get(val, "Active")
+        return USER_STATUS_MAP.get(val, "Active")
     s = str(val).strip()
     if s.isdigit():
-        return CONTENT_TAG_STATUS_MAP.get(int(s), "Active")
-    return CONTENT_TAG_STATUS_MAP.get(s.lower(), "Active")
+        return USER_STATUS_MAP.get(int(s), "Active")
+    return USER_STATUS_MAP.get(s.lower(), "Active")
+
+
+def map_user_gender(val: Any) -> str:
+    if val is None:
+        return "NoInfo"
+    s = str(val).strip().lower()
+    return USER_GENDER_MAP.get(s, "NoInfo")
 
 
 # -----------------------------------------------------------------------------
@@ -294,33 +333,51 @@ def map_content_tag_status(val: Any) -> str:
 # -----------------------------------------------------------------------------
 
 
-def extract_content_tag_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for content_tags table."""
+def extract_user_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for users table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    tag_id = None
-    if raw_id:
-        clean_raw = str(raw_id).strip()
-        last_part = clean_raw.rsplit("/", 1)[-1]
-        if UUID_RE.fullmatch(last_part):
-            tag_id = last_part.lower()
-        elif UUID_RE.fullmatch(clean_raw):
-            tag_id = clean_raw.lower()
-        else:
-            tag_id = str(
-                uuid.uuid5(UUID_NAMESPACE_CONTENT_TAGS, clean_raw)
-            ).lower()
-    if not tag_id:
-        raise ValueError(f"ContentTag missing valid ID: {raw_id}")
+    user_id = clean_uuid(raw_id)
+    if not user_id:
+        raise ValueError(f"User missing valid UUID: {raw_id}")
 
-    name = clean_str(doc.get("Name"), 255)
-    predefined = clean_bool(doc.get("Predefined"), default=False)
-    csn = clean_str(doc.get("CSN"), 50)
-    meta = as_json(
-        doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {},
-        default_val={},
-    )
-    status = map_content_tag_status(doc.get("Status"))
+    password = clean_str(doc.get("Password"))
+    salt = clean_str(doc.get("Salt"), 100)
+    password_reset_on = parse_iso_timestamp(doc.get("PasswordResetOn"))
+    otp = clean_str(doc.get("OTP"), 50)
+    otp_validity = parse_iso_timestamp(doc.get("OTPValidity"))
+    handle = clean_str(doc.get("Handle"), 100)
+    force_change_password = clean_bool(doc.get("ForceChangePassword"), False)
+    password_changed_on = parse_iso_timestamp(doc.get("PasswordChangedOn"))
+    confirmed_on = parse_iso_timestamp(doc.get("ConfirmedOn"))
+
+    profile = as_json(doc.get("Profile") if isinstance(doc.get("Profile"), dict) else {}, default_val={})
+    preferences = as_json(doc.get("Preferences") if isinstance(doc.get("Preferences"), dict) else {}, default_val={})
+    status = map_user_status(doc.get("Status"))
+    is_virtual = clean_bool(doc.get("IsVirtual"), False)
+
+    push_notifications = as_json(doc.get("PushNotifications") if isinstance(doc.get("PushNotifications"), list) else [], default_val=[])
+    personas = clean_string_list(doc.get("Personas"))
+    current_persona = clean_uuid(doc.get("CurrentPersona"))
+
+    recovery_email = clean_str(doc.get("RecoveryEmail"), 255)
+    recovery_mobile = clean_str(doc.get("RecoveryMobile"), 50)
+    first_name = clean_str(doc.get("FirstName"), 150)
+    middle_name = clean_str(doc.get("MiddleName"), 150)
+    last_name = clean_str(doc.get("LastName"), 150)
+    name = clean_str(doc.get("Name"), 250)
+    title = clean_str(doc.get("Title"), 50)
+    gender = map_user_gender(doc.get("Gender"))
+    dob = parse_iso_timestamp(doc.get("DOB"))
+    email = clean_str(doc.get("Email"), 255)
+    mobile = clean_str(doc.get("Mobile"), 50)
+    notification = clean_bool(doc.get("Notification"), True)
+    virtual_id = clean_str(doc.get("VirtualId"), 255)
+
+    contacts = as_json(doc.get("Contacts") if isinstance(doc.get("Contacts"), list) else [], default_val=[])
+    addresses = as_json(doc.get("Addresses") if isinstance(doc.get("Addresses"), list) else [], default_val=[])
+    tags = clean_string_list(doc.get("Tags"))
+    attributes = as_json(doc.get("Attributes") if isinstance(doc.get("Attributes"), dict) else {}, default_val={})
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -332,12 +389,40 @@ def extract_content_tag_fields(doc: Dict[str, Any]) -> Tuple:
     modified_by = clean_uuid(doc.get("ModifiedBy"))
 
     return (
-        tag_id,
-        name,
-        predefined,
-        csn,
-        meta,
+        user_id,
+        password,
+        salt,
+        password_reset_on,
+        otp,
+        otp_validity,
+        handle,
+        force_change_password,
+        password_changed_on,
+        confirmed_on,
+        profile,
+        preferences,
         status,
+        is_virtual,
+        push_notifications,
+        personas,
+        current_persona,
+        recovery_email,
+        recovery_mobile,
+        first_name,
+        middle_name,
+        last_name,
+        name,
+        title,
+        gender,
+        dob,
+        email,
+        mobile,
+        notification,
+        virtual_id,
+        contacts,
+        addresses,
+        tags,
+        attributes,
         owner_id,
         parent_id,
         created_on,
@@ -348,39 +433,81 @@ def extract_content_tag_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup (Only primary key, no secondary indexes, no views)
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and content_tags table without secondary indexes or views."""
+    """Create target enums and users table without secondary indexes."""
     cur.execute(
         """
+        -- 1. Create Enums
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'content_tag_status_enum') THEN
-                CREATE TYPE content_tag_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_status_enum') THEN
+                CREATE TYPE user_status_enum AS ENUM (
                     'Unknown',
                     'Active',
                     'Disabled'
                 );
             END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_gender_enum') THEN
+                CREATE TYPE user_gender_enum AS ENUM (
+                    'Female',
+                    'Male',
+                    'Other',
+                    'NoInfo'
+                );
+            END IF;
         END $$;
 
-        CREATE TABLE IF NOT EXISTS content_tags (
+        -- 2. Create Target Table (No secondary indexes)
+        CREATE TABLE IF NOT EXISTS "users" (
             id UUID PRIMARY KEY,
-            name VARCHAR(255),
-            predefined BOOLEAN DEFAULT FALSE,
-            csn VARCHAR(50),
-            meta JSONB DEFAULT '{}'::jsonb,
-            status content_tag_status_enum NOT NULL DEFAULT 'Active',
+            password TEXT,
+            salt VARCHAR(100),
+            password_reset_on TIMESTAMPTZ,
+            otp VARCHAR(50),
+            otp_validity TIMESTAMPTZ,
+            handle VARCHAR(100),
+            force_change_password BOOLEAN DEFAULT FALSE,
+            password_changed_on TIMESTAMPTZ,
+            confirmed_on TIMESTAMPTZ,
+            profile JSONB DEFAULT '{}'::jsonb,
+            preferences JSONB DEFAULT '{}'::jsonb,
+            status user_status_enum NOT NULL DEFAULT 'Active',
+            is_virtual BOOLEAN DEFAULT FALSE,
+            push_notifications JSONB DEFAULT '[]'::jsonb,
+            personas TEXT[] DEFAULT '{}'::text[],
+            current_persona UUID,
+            recovery_email VARCHAR(255),
+            recovery_mobile VARCHAR(50),
+            first_name VARCHAR(150),
+            middle_name VARCHAR(150),
+            last_name VARCHAR(150),
+            name VARCHAR(250),
+            title VARCHAR(50),
+            gender user_gender_enum NOT NULL DEFAULT 'NoInfo',
+            dob TIMESTAMPTZ,
+            email VARCHAR(255),
+            mobile VARCHAR(50),
+            notification BOOLEAN DEFAULT TRUE,
+            virtual_id VARCHAR(255),
+            contacts JSONB DEFAULT '[]'::jsonb,
+            addresses JSONB DEFAULT '[]'::jsonb,
+            tags TEXT[] DEFAULT '{}'::text[],
+            attributes JSONB DEFAULT '{}'::jsonb,
             owner_id UUID,
             parent_id UUID,
-            created_on TIMESTAMPTZ,
+            created_on TIMESTAMPTZ NOT NULL,
             created_by UUID,
             modified_on TIMESTAMPTZ,
             modified_by UUID
         );
+
+        -- Backward-compatibility view for singular 'user' query
+        CREATE OR REPLACE VIEW "user" AS SELECT * FROM "users";
         """
     )
 
@@ -390,34 +517,63 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_content_tag(
-    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
-) -> UpsertResult:
-    """Idempotently upsert a ContentTag document."""
-    fields = extract_content_tag_fields(doc)
+def upsert_user(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
+    """Idempotently upsert a User document."""
+    fields = extract_user_fields(doc)
     sql = """
-        INSERT INTO content_tags (
-            id,
-            name,
-            predefined,
-            csn,
-            meta,
-            status,
-            owner_id,
-            parent_id,
-            created_on,
-            created_by,
-            modified_on,
-            modified_by
+        INSERT INTO "users" (
+            id, password, salt, password_reset_on, otp, otp_validity, handle,
+            force_change_password, password_changed_on, confirmed_on,
+            profile, preferences, status, is_virtual, push_notifications,
+            personas, current_persona, recovery_email, recovery_mobile,
+            first_name, middle_name, last_name, name, title, gender,
+            dob, email, mobile, notification, virtual_id,
+            contacts, addresses, tags, attributes,
+            owner_id, parent_id, created_on, created_by, modified_on, modified_by
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            predefined = EXCLUDED.predefined,
-            csn = EXCLUDED.csn,
-            meta = EXCLUDED.meta,
+            password = EXCLUDED.password,
+            salt = EXCLUDED.salt,
+            password_reset_on = EXCLUDED.password_reset_on,
+            otp = EXCLUDED.otp,
+            otp_validity = EXCLUDED.otp_validity,
+            handle = EXCLUDED.handle,
+            force_change_password = EXCLUDED.force_change_password,
+            password_changed_on = EXCLUDED.password_changed_on,
+            confirmed_on = EXCLUDED.confirmed_on,
+            profile = EXCLUDED.profile,
+            preferences = EXCLUDED.preferences,
             status = EXCLUDED.status,
+            is_virtual = EXCLUDED.is_virtual,
+            push_notifications = EXCLUDED.push_notifications,
+            personas = EXCLUDED.personas,
+            current_persona = EXCLUDED.current_persona,
+            recovery_email = EXCLUDED.recovery_email,
+            recovery_mobile = EXCLUDED.recovery_mobile,
+            first_name = EXCLUDED.first_name,
+            middle_name = EXCLUDED.middle_name,
+            last_name = EXCLUDED.last_name,
+            name = EXCLUDED.name,
+            title = EXCLUDED.title,
+            gender = EXCLUDED.gender,
+            dob = EXCLUDED.dob,
+            email = EXCLUDED.email,
+            mobile = EXCLUDED.mobile,
+            notification = EXCLUDED.notification,
+            virtual_id = EXCLUDED.virtual_id,
+            contacts = EXCLUDED.contacts,
+            addresses = EXCLUDED.addresses,
+            tags = EXCLUDED.tags,
+            attributes = EXCLUDED.attributes,
             owner_id = EXCLUDED.owner_id,
             parent_id = EXCLUDED.parent_id,
             created_on = EXCLUDED.created_on,
@@ -501,7 +657,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for ContentTags."""
+    """Run the end-to-end migration for Users."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -511,24 +667,24 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.content_tags_collection}"
+            f"collection={cfg.users_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        content_tag_docs = raven_query_collection(
-            requests_session, cfg, cfg.content_tags_collection
+        user_docs = raven_query_collection(
+            requests_session, cfg, cfg.users_collection
         )
 
         # Fallback to singular name if 0 docs fetched with default collection name
-        if not content_tag_docs and cfg.content_tags_collection == "ContentTags":
+        if not user_docs and cfg.users_collection == "Users":
             try:
-                alt_docs = raven_query_collection(requests_session, cfg, "ContentTag")
+                alt_docs = raven_query_collection(requests_session, cfg, "User")
                 if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'ContentTag'.")
-                    content_tag_docs = alt_docs
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'User'.")
+                    user_docs = alt_docs
             except Exception:
                 pass
 
-        print(f"Fetched content_tags={len(content_tag_docs)}")
+        print(f"Fetched users={len(user_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -547,19 +703,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_tags = 0
-        new_tags = 0
+        loaded_users = 0
+        new_users = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting content tags...")
-                for d in content_tag_docs:
-                    res = upsert_content_tag(cur, d)
-                    loaded_tags += 1
-                    new_tags += int(res.inserted)
+                print("[4/4] Upserting users...")
+                for d in user_docs:
+                    res = upsert_user(cur, d)
+                    loaded_users += 1
+                    new_users += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -568,7 +724,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.content_tags_collection,
+                "collection": cfg.users_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -577,14 +733,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "content_tags_processed": loaded_tags,
-                "new_content_tags_inserted": new_tags,
+                "users_processed": loaded_users,
+                "new_users_inserted": new_users,
             },
         }
 
         print("Migration completed.")
-        print(f"content_tags_processed: {loaded_tags}")
-        print(f"new_content_tags_inserted: {new_tags}")
+        print(f"users_processed: {loaded_users}")
+        print(f"new_users_inserted: {new_users}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

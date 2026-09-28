@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract Users data from RavenDB,
+Extract Receipts data from RavenDB,
 transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
 and load into PostgreSQL.
 
 Target table:
-- users
+- receipts
 """
 
 from __future__ import annotations
@@ -13,12 +13,14 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
 import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 import psycopg2
 from psycopg2.extras import Json
@@ -27,6 +29,8 @@ import requests
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
+
+UUID_NAMESPACE_RECEIPTS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 
 # -----------------------------------------------------------------------------
@@ -46,7 +50,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    users_collection: str
+    receipts_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -85,12 +89,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate Users from RavenDB to PostgreSQL"
+        description="Migrate Receipts from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -111,9 +120,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--users-collection",
-        default=os.getenv("USERS_COLLECTION", "Users"),
-        help="RavenDB collection name for users (default: Users)",
+        "--receipts-collection",
+        default=os.getenv("RECEIPTS_COLLECTION", "Receipts"),
+        help="RavenDB collection name for receipts (default: Receipts)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -156,11 +165,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -180,7 +193,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        users_collection=args.users_collection,
+        receipts_collection=args.receipts_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -225,16 +238,28 @@ def clean_bool(val: Any, default: bool = False) -> bool:
     return str(val).strip().lower() in {"true", "1", "yes"}
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
-    if raw_val is None:
-        return []
-    if isinstance(raw_val, list):
-        return [str(item).strip() for item in raw_val if str(item).strip()]
-    if isinstance(raw_val, str):
-        cleaned = raw_val.strip()
-        return [cleaned] if cleaned else []
-    return [str(raw_val)]
+def clean_int(val: Any) -> Optional[int]:
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def clean_decimal(val: Any, default: Optional[Decimal] = None) -> Optional[Decimal]:
+    """Parse numeric/decimal value into Decimal(18, 2)."""
+    if val is None:
+        return default
+    if isinstance(val, Decimal):
+        return val.quantize(Decimal("0.01"))
+    text = str(val).strip().replace(",", "")
+    if not text:
+        return default
+    try:
+        return Decimal(text).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
 
 
 def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
@@ -277,46 +302,86 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 
 
 # -----------------------------------------------------------------------------
-# Enum Mappings
+# Enum Mappings (Exact match to C# Enums)
 # -----------------------------------------------------------------------------
 
-USER_STATUS_MAP: Dict[Any, str] = {
+PAYMENT_MODE_MAP: Dict[Any, str] = {
+    10: "Cash",
+    20: "Cheque",
+    30: "DemandDraft",
+    40: "NetBanking",
+    50: "UPI",
+    "cash": "Cash",
+    "cheque": "Cheque",
+    "check": "Cheque",
+    "dd": "DemandDraft",
+    "demanddraft": "DemandDraft",
+    "demand_draft": "DemandDraft",
+    "netbanking": "NetBanking",
+    "net_banking": "NetBanking",
+    "online": "NetBanking",
+    "card": "NetBanking",
+    "upi": "UPI",
+    "other": "Other",
+    "unknown": "Unknown",
+}
+
+RECEIPT_STATUS_MAP: Dict[Any, str] = {
     0: "Unknown",
     1: "Active",
-    99: "Disabled",
-    "unknown": "Unknown",
+    99: "Cancelled",
     "active": "Active",
-    "disabled": "Disabled",
-    "inactive": "Disabled",
+    "cancelled": "Cancelled",
+    "canceled": "Cancelled",
+    "disabled": "Cancelled",
+    "inactive": "Cancelled",
+    "unknown": "Unknown",
 }
 
-USER_GENDER_MAP: Dict[str, str] = {
-    "female": "Female",
-    "f": "Female",
-    "male": "Male",
-    "m": "Male",
-    "other": "Other",
-    "noinfo": "NoInfo",
-    "unknown": "NoInfo",
+RECEIPT_TYPE_MAP: Dict[Any, str] = {
+    0: "Unknown",
+    10: "Regular",
+    20: "Donation",
+    "regular": "Regular",
+    "donation": "Donation",
+    "unknown": "Unknown",
 }
 
 
-def map_user_status(val: Any) -> str:
+def map_payment_mode(val: Any) -> str:
+    if val is None:
+        return "Cash"
+    if isinstance(val, int):
+        return PAYMENT_MODE_MAP.get(val, "Cash")
+    s = str(val).strip()
+    if s.isdigit():
+        return PAYMENT_MODE_MAP.get(int(s), "Cash")
+    norm = s.lower().replace(" ", "").replace("_", "")
+    return PAYMENT_MODE_MAP.get(norm, "Cash")
+
+
+def map_receipt_status(val: Any) -> str:
     if val is None:
         return "Active"
     if isinstance(val, int):
-        return USER_STATUS_MAP.get(val, "Active")
+        return RECEIPT_STATUS_MAP.get(val, "Active")
     s = str(val).strip()
     if s.isdigit():
-        return USER_STATUS_MAP.get(int(s), "Active")
-    return USER_STATUS_MAP.get(s.lower(), "Active")
+        return RECEIPT_STATUS_MAP.get(int(s), "Active")
+    norm = s.lower().replace(" ", "").replace("_", "")
+    return RECEIPT_STATUS_MAP.get(norm, "Active")
 
 
-def map_user_gender(val: Any) -> str:
+def map_receipt_type(val: Any) -> str:
     if val is None:
-        return "NoInfo"
-    s = str(val).strip().lower()
-    return USER_GENDER_MAP.get(s, "NoInfo")
+        return "Regular"
+    if isinstance(val, int):
+        return RECEIPT_TYPE_MAP.get(val, "Regular")
+    s = str(val).strip()
+    if s.isdigit():
+        return RECEIPT_TYPE_MAP.get(int(s), "Regular")
+    norm = s.lower().replace(" ", "").replace("_", "")
+    return RECEIPT_TYPE_MAP.get(norm, "Regular")
 
 
 # -----------------------------------------------------------------------------
@@ -324,51 +389,42 @@ def map_user_gender(val: Any) -> str:
 # -----------------------------------------------------------------------------
 
 
-def extract_user_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for users table."""
+def extract_receipt_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for receipts table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    user_id = clean_uuid(raw_id)
-    if not user_id:
-        raise ValueError(f"User missing valid UUID: {raw_id}")
+    receipt_id = clean_uuid(raw_id)
+    if not receipt_id and raw_id:
+        receipt_id = str(
+            uuid.uuid5(UUID_NAMESPACE_RECEIPTS, str(raw_id).strip())
+        ).lower()
+    if not receipt_id:
+        raise ValueError(f"Receipt missing valid ID: {raw_id}")
 
-    password = clean_str(doc.get("Password"))
-    salt = clean_str(doc.get("Salt"), 100)
-    password_reset_on = parse_iso_timestamp(doc.get("PasswordResetOn"))
-    otp = clean_str(doc.get("OTP"), 50)
-    otp_validity = parse_iso_timestamp(doc.get("OTPValidity"))
-    handle = clean_str(doc.get("Handle"), 100)
-    force_change_password = clean_bool(doc.get("ForceChangePassword"), False)
-    password_changed_on = parse_iso_timestamp(doc.get("PasswordChangedOn"))
-    confirmed_on = parse_iso_timestamp(doc.get("ConfirmedOn"))
+    number = clean_str(doc.get("Number"), 50)
+    inst_id = clean_uuid(doc.get("InstId"))
+    date_val = parse_iso_timestamp(doc.get("Date"))
 
-    profile = as_json(doc.get("Profile") if isinstance(doc.get("Profile"), dict) else {}, default_val={})
-    preferences = as_json(doc.get("Preferences") if isinstance(doc.get("Preferences"), dict) else {}, default_val={})
-    status = map_user_status(doc.get("Status"))
-    is_virtual = clean_bool(doc.get("IsVirtual"), False)
+    customer = as_json(doc.get("Customer") if isinstance(doc.get("Customer"), dict) else {}, default_val={})
+    order_items = as_json(doc.get("OrderItems") if isinstance(doc.get("OrderItems"), list) else [], default_val=[])
 
-    push_notifications = as_json(doc.get("PushNotifications") if isinstance(doc.get("PushNotifications"), list) else [], default_val=[])
-    personas = clean_string_list(doc.get("Personas"))
-    current_persona = clean_uuid(doc.get("CurrentPersona"))
+    total_amount = clean_decimal(doc.get("TotalAmount"), default=Decimal("0.00"))
+    received_by = clean_str(doc.get("ReceivedBy"), 150)
+    payment_mode = map_payment_mode(doc.get("PaymentMode"))
 
-    recovery_email = clean_str(doc.get("RecoveryEmail"), 255)
-    recovery_mobile = clean_str(doc.get("RecoveryMobile"), 50)
-    first_name = clean_str(doc.get("FirstName"), 150)
-    middle_name = clean_str(doc.get("MiddleName"), 150)
-    last_name = clean_str(doc.get("LastName"), 150)
-    name = clean_str(doc.get("Name"), 250)
-    title = clean_str(doc.get("Title"), 50)
-    gender = map_user_gender(doc.get("Gender"))
-    dob = parse_iso_timestamp(doc.get("DOB"))
-    email = clean_str(doc.get("Email"), 255)
-    mobile = clean_str(doc.get("Mobile"), 50)
-    notification = clean_bool(doc.get("Notification"), True)
-    virtual_id = clean_str(doc.get("VirtualId"), 255)
+    fin_inst = doc.get("FinancialInstrument")
+    financial_instrument = as_json(fin_inst) if fin_inst is not None else None
 
-    contacts = as_json(doc.get("Contacts") if isinstance(doc.get("Contacts"), list) else [], default_val=[])
-    addresses = as_json(doc.get("Addresses") if isinstance(doc.get("Addresses"), list) else [], default_val=[])
-    tags = clean_string_list(doc.get("Tags"))
-    attributes = as_json(doc.get("Attributes") if isinstance(doc.get("Attributes"), dict) else {}, default_val={})
+    status = map_receipt_status(doc.get("Status"))
+    receipt_type = map_receipt_type(doc.get("ReceiptType"))
+    revenue_sharing_enabled = clean_bool(doc.get("RevenueSharingEnabled"), default=False)
+    # In .NET ct.gr Receipt.cs: public int RevenueShare { get; set; }
+    revenue_share = clean_int(doc.get("RevenueShare")) or 0
+
+    meta = as_json(doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {}, default_val={})
+    html = clean_str(doc.get("HTML"))
+    # In .NET ct.gr Receipt.cs: public string RefNo { get; set; }
+    ref_no = clean_str(doc.get("RefNo"), 100)
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -380,40 +436,23 @@ def extract_user_fields(doc: Dict[str, Any]) -> Tuple:
     modified_by = clean_uuid(doc.get("ModifiedBy"))
 
     return (
-        user_id,
-        password,
-        salt,
-        password_reset_on,
-        otp,
-        otp_validity,
-        handle,
-        force_change_password,
-        password_changed_on,
-        confirmed_on,
-        profile,
-        preferences,
+        receipt_id,
+        number,
+        inst_id,
+        date_val,
+        customer,
+        order_items,
+        total_amount,
+        received_by,
+        payment_mode,
+        financial_instrument,
         status,
-        is_virtual,
-        push_notifications,
-        personas,
-        current_persona,
-        recovery_email,
-        recovery_mobile,
-        first_name,
-        middle_name,
-        last_name,
-        name,
-        title,
-        gender,
-        dob,
-        email,
-        mobile,
-        notification,
-        virtual_id,
-        contacts,
-        addresses,
-        tags,
-        attributes,
+        receipt_type,
+        revenue_sharing_enabled,
+        revenue_share,
+        meta,
+        html,
+        ref_no,
         owner_id,
         parent_id,
         created_on,
@@ -429,66 +468,61 @@ def extract_user_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and users table without secondary indexes."""
+    """Create target enums and receipts table without secondary indexes."""
     cur.execute(
         """
-        -- 1. Create Enums
+        -- 1. Create or extend Enums
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_status_enum') THEN
-                CREATE TYPE user_status_enum AS ENUM (
-                    'Unknown',
-                    'Active',
-                    'Disabled'
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'receipt_payment_mode_enum') THEN
+                CREATE TYPE receipt_payment_mode_enum AS ENUM (
+                    'Cash',
+                    'Cheque',
+                    'DemandDraft',
+                    'NetBanking',
+                    'UPI',
+                    'Other',
+                    'Unknown'
                 );
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_gender_enum') THEN
-                CREATE TYPE user_gender_enum AS ENUM (
-                    'Female',
-                    'Male',
-                    'Other',
-                    'NoInfo'
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'receipt_status_enum') THEN
+                CREATE TYPE receipt_status_enum AS ENUM (
+                    'Active',
+                    'Cancelled',
+                    'Disabled',
+                    'Unknown'
+                );
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'receipt_type_enum') THEN
+                CREATE TYPE receipt_type_enum AS ENUM (
+                    'Regular',
+                    'Donation',
+                    'Unknown'
                 );
             END IF;
         END $$;
 
         -- 2. Create Target Table (No secondary indexes)
-        CREATE TABLE IF NOT EXISTS "users" (
+        CREATE TABLE IF NOT EXISTS receipts (
             id UUID PRIMARY KEY,
-            password TEXT,
-            salt VARCHAR(100),
-            password_reset_on TIMESTAMPTZ,
-            otp VARCHAR(50),
-            otp_validity TIMESTAMPTZ,
-            handle VARCHAR(100),
-            force_change_password BOOLEAN DEFAULT FALSE,
-            password_changed_on TIMESTAMPTZ,
-            confirmed_on TIMESTAMPTZ,
-            profile JSONB DEFAULT '{}'::jsonb,
-            preferences JSONB DEFAULT '{}'::jsonb,
-            status user_status_enum NOT NULL DEFAULT 'Active',
-            is_virtual BOOLEAN DEFAULT FALSE,
-            push_notifications JSONB DEFAULT '[]'::jsonb,
-            personas TEXT[] DEFAULT '{}'::text[],
-            current_persona UUID,
-            recovery_email VARCHAR(255),
-            recovery_mobile VARCHAR(50),
-            first_name VARCHAR(150),
-            middle_name VARCHAR(150),
-            last_name VARCHAR(150),
-            name VARCHAR(250),
-            title VARCHAR(50),
-            gender user_gender_enum NOT NULL DEFAULT 'NoInfo',
-            dob TIMESTAMPTZ,
-            email VARCHAR(255),
-            mobile VARCHAR(50),
-            notification BOOLEAN DEFAULT TRUE,
-            virtual_id VARCHAR(255),
-            contacts JSONB DEFAULT '[]'::jsonb,
-            addresses JSONB DEFAULT '[]'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            attributes JSONB DEFAULT '{}'::jsonb,
+            number VARCHAR(50),
+            inst_id UUID,
+            date TIMESTAMPTZ,
+            customer JSONB DEFAULT '{}'::jsonb,
+            order_items JSONB DEFAULT '[]'::jsonb,
+            total_amount NUMERIC(18, 2),
+            received_by VARCHAR(150),
+            payment_mode receipt_payment_mode_enum NOT NULL DEFAULT 'Cash',
+            financial_instrument JSONB,
+            status receipt_status_enum NOT NULL DEFAULT 'Active',
+            receipt_type receipt_type_enum NOT NULL DEFAULT 'Regular',
+            revenue_sharing_enabled BOOLEAN DEFAULT FALSE,
+            revenue_share INTEGER DEFAULT 0,
+            meta JSONB DEFAULT '{}'::jsonb,
+            html TEXT,
+            ref_no VARCHAR(100),
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,
@@ -497,8 +531,10 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        -- Backward-compatibility view for singular 'user' query
-        CREATE OR REPLACE VIEW "user" AS SELECT * FROM "users";
+        ALTER TABLE receipts ADD COLUMN IF NOT EXISTS ref_no VARCHAR(100);
+
+        -- Backward-compatibility view for singular 'receipt'
+        CREATE OR REPLACE VIEW receipt AS SELECT * FROM receipts;
         """
     )
 
@@ -508,63 +544,58 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_user(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert a User document."""
-    fields = extract_user_fields(doc)
+def upsert_receipt(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert a Receipt document."""
+    fields = extract_receipt_fields(doc)
     sql = """
-        INSERT INTO "users" (
-            id, password, salt, password_reset_on, otp, otp_validity, handle,
-            force_change_password, password_changed_on, confirmed_on,
-            profile, preferences, status, is_virtual, push_notifications,
-            personas, current_persona, recovery_email, recovery_mobile,
-            first_name, middle_name, last_name, name, title, gender,
-            dob, email, mobile, notification, virtual_id,
-            contacts, addresses, tags, attributes,
-            owner_id, parent_id, created_on, created_by, modified_on, modified_by
+        INSERT INTO receipts (
+            id,
+            number,
+            inst_id,
+            date,
+            customer,
+            order_items,
+            total_amount,
+            received_by,
+            payment_mode,
+            financial_instrument,
+            status,
+            receipt_type,
+            revenue_sharing_enabled,
+            revenue_share,
+            meta,
+            html,
+            ref_no,
+            owner_id,
+            parent_id,
+            created_on,
+            created_by,
+            modified_on,
+            modified_by
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s,
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            password = EXCLUDED.password,
-            salt = EXCLUDED.salt,
-            password_reset_on = EXCLUDED.password_reset_on,
-            otp = EXCLUDED.otp,
-            otp_validity = EXCLUDED.otp_validity,
-            handle = EXCLUDED.handle,
-            force_change_password = EXCLUDED.force_change_password,
-            password_changed_on = EXCLUDED.password_changed_on,
-            confirmed_on = EXCLUDED.confirmed_on,
-            profile = EXCLUDED.profile,
-            preferences = EXCLUDED.preferences,
+            number = EXCLUDED.number,
+            inst_id = EXCLUDED.inst_id,
+            date = EXCLUDED.date,
+            customer = EXCLUDED.customer,
+            order_items = EXCLUDED.order_items,
+            total_amount = EXCLUDED.total_amount,
+            received_by = EXCLUDED.received_by,
+            payment_mode = EXCLUDED.payment_mode,
+            financial_instrument = EXCLUDED.financial_instrument,
             status = EXCLUDED.status,
-            is_virtual = EXCLUDED.is_virtual,
-            push_notifications = EXCLUDED.push_notifications,
-            personas = EXCLUDED.personas,
-            current_persona = EXCLUDED.current_persona,
-            recovery_email = EXCLUDED.recovery_email,
-            recovery_mobile = EXCLUDED.recovery_mobile,
-            first_name = EXCLUDED.first_name,
-            middle_name = EXCLUDED.middle_name,
-            last_name = EXCLUDED.last_name,
-            name = EXCLUDED.name,
-            title = EXCLUDED.title,
-            gender = EXCLUDED.gender,
-            dob = EXCLUDED.dob,
-            email = EXCLUDED.email,
-            mobile = EXCLUDED.mobile,
-            notification = EXCLUDED.notification,
-            virtual_id = EXCLUDED.virtual_id,
-            contacts = EXCLUDED.contacts,
-            addresses = EXCLUDED.addresses,
-            tags = EXCLUDED.tags,
-            attributes = EXCLUDED.attributes,
+            receipt_type = EXCLUDED.receipt_type,
+            revenue_sharing_enabled = EXCLUDED.revenue_sharing_enabled,
+            revenue_share = EXCLUDED.revenue_share,
+            meta = EXCLUDED.meta,
+            html = EXCLUDED.html,
+            ref_no = EXCLUDED.ref_no,
             owner_id = EXCLUDED.owner_id,
             parent_id = EXCLUDED.parent_id,
             created_on = EXCLUDED.created_on,
@@ -648,7 +679,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for Users."""
+    """Run the end-to-end migration for Receipts."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -658,24 +689,24 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.users_collection}"
+            f"collection={cfg.receipts_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        user_docs = raven_query_collection(
-            requests_session, cfg, cfg.users_collection
+        receipt_docs = raven_query_collection(
+            requests_session, cfg, cfg.receipts_collection
         )
 
         # Fallback to singular name if 0 docs fetched with default collection name
-        if not user_docs and cfg.users_collection == "Users":
+        if not receipt_docs and cfg.receipts_collection == "Receipts":
             try:
-                alt_docs = raven_query_collection(requests_session, cfg, "User")
+                alt_docs = raven_query_collection(requests_session, cfg, "Receipt")
                 if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'User'.")
-                    user_docs = alt_docs
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'Receipt'.")
+                    receipt_docs = alt_docs
             except Exception:
                 pass
 
-        print(f"Fetched users={len(user_docs)}")
+        print(f"Fetched receipts={len(receipt_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -694,19 +725,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_users = 0
-        new_users = 0
+        loaded_receipts = 0
+        new_receipts = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting users...")
-                for d in user_docs:
-                    res = upsert_user(cur, d)
-                    loaded_users += 1
-                    new_users += int(res.inserted)
+                print("[4/4] Upserting receipts...")
+                for d in receipt_docs:
+                    res = upsert_receipt(cur, d)
+                    loaded_receipts += 1
+                    new_receipts += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -715,7 +746,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.users_collection,
+                "collection": cfg.receipts_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -724,14 +755,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "users_processed": loaded_users,
-                "new_users_inserted": new_users,
+                "receipts_processed": loaded_receipts,
+                "new_receipts_inserted": new_receipts,
             },
         }
 
         print("Migration completed.")
-        print(f"users_processed: {loaded_users}")
-        print(f"new_users_inserted: {new_users}")
+        print(f"receipts_processed: {loaded_receipts}")
+        print(f"new_receipts_inserted: {new_receipts}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

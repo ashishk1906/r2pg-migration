@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract MemberViews data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL types and JSONB,
+Extract SeatMatrices data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL types and JSONBs,
 and load into PostgreSQL.
 
 Target table:
-- member_views
+- seat_matrices (with backward-compatible view: seat_matrix)
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
-UUID_NAMESPACE_MEMBER_VIEWS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+UUID_NAMESPACE_SEAT_MATRICES = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 
 # -----------------------------------------------------------------------------
@@ -49,7 +49,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    member_views_collection: str
+    seat_matrices_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -88,12 +88,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate MemberViews from RavenDB to PostgreSQL"
+        description="Migrate SeatMatrices from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -114,9 +119,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--member-views-collection",
-        default=os.getenv("MEMBER_VIEWS_COLLECTION", "MemberViews"),
-        help="RavenDB collection name for member views (default: MemberViews)",
+        "--seat-matrices-collection",
+        default=os.getenv("SEAT_MATRICES_COLLECTION", "SeatMatrices"),
+        help="RavenDB collection name for seat matrices (default: SeatMatrices)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -159,11 +164,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -183,7 +192,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        member_views_collection=args.member_views_collection,
+        seat_matrices_collection=args.seat_matrices_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -220,6 +229,15 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
+def clean_int(val: Any) -> Optional[int]:
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
 def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
@@ -227,56 +245,111 @@ def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     return Json(value)
 
 
+def parse_iso_timestamp(val: Any) -> Optional[datetime]:
+    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
+    if not val:
+        return None
+    text = str(val).strip()
+    if not text:
+        return None
+
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    if "." in normalized:
+        base, frac = normalized.split(".", 1)
+        tz_pos = max(frac.find("+"), frac.find("-"))
+        if tz_pos >= 0:
+            frac_part = frac[:tz_pos]
+            tz_part = frac[tz_pos:]
+        else:
+            frac_part = frac
+            tz_part = ""
+        digits = "".join(ch for ch in frac_part if ch.isdigit())[:6]
+        normalized = f"{base}.{digits}{tz_part}" if digits else f"{base}{tz_part}"
+    if "+" not in normalized[10:] and "-" not in normalized[10:]:
+        normalized = f"{normalized}+00:00"
+
+    try:
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
 # -----------------------------------------------------------------------------
 # Document Field Extractor (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_member_view_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for member_views table."""
+def extract_seat_matrix_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for seat_matrices table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    member_view_id = clean_uuid(raw_id)
-    if not member_view_id and raw_id:
-        member_view_id = str(
-            uuid.uuid5(UUID_NAMESPACE_MEMBER_VIEWS, str(raw_id).strip())
+    seat_matrix_id = clean_uuid(raw_id)
+    if not seat_matrix_id and raw_id:
+        seat_matrix_id = str(
+            uuid.uuid5(UUID_NAMESPACE_SEAT_MATRICES, str(raw_id).strip())
         ).lower()
-    if not member_view_id:
-        raise ValueError(f"MemberView missing valid ID: {raw_id}")
+    if not seat_matrix_id:
+        raise ValueError(f"SeatMatrix missing valid UUID: {raw_id}")
+
+    course_id = clean_uuid(doc.get("CourseId"))
+    course = clean_str(doc.get("Course"), 255)
+    total_seats = clean_int(doc.get("TotalSeats"))
+    break_up_raw = doc.get("BreakUp")
+    break_up = as_json(break_up_raw if isinstance(break_up_raw, list) else [], default_val=[])
 
     owner_id = clean_uuid(doc.get("OwnerId"))
-    membership_id = clean_str(doc.get("MembershipId"), 100)
-    member_type = clean_str(doc.get("MemberType"), 50)
-    issued_books = as_json(
-        doc.get("IssuedBooks") if isinstance(doc.get("IssuedBooks"), list) else [],
-        default_val=[],
-    )
+    parent_id = clean_uuid(doc.get("ParentId"))
+    created_on = parse_iso_timestamp(
+        doc.get("CreatedOn") or metadata.get("@last-modified")
+    ) or datetime.now(timezone.utc)
+    created_by = clean_uuid(doc.get("CreatedBy"))
+    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
+    modified_by = clean_uuid(doc.get("ModifiedBy"))
 
     return (
-        member_view_id,
+        seat_matrix_id,
+        course_id,
+        course,
+        total_seats,
+        break_up,
         owner_id,
-        membership_id,
-        member_type,
-        issued_books,
+        parent_id,
+        created_on,
+        created_by,
+        modified_on,
+        modified_by,
     )
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup (Only primary key, no secondary indexes, no views)
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target member_views table without secondary indexes or views."""
+    """Create seat_matrices table without secondary indexes."""
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS member_views (
+        -- 1. Create Target Table (No secondary indexes)
+        CREATE TABLE IF NOT EXISTS seat_matrices (
             id UUID PRIMARY KEY,
+            course_id UUID,
+            course VARCHAR(255),
+            total_seats INT,
+            break_up JSONB DEFAULT '[]'::jsonb,
             owner_id UUID,
-            membership_id VARCHAR(100),
-            member_type VARCHAR(50),
-            issued_books JSONB DEFAULT '[]'::jsonb
+            parent_id UUID,
+            created_on TIMESTAMPTZ NOT NULL,
+            created_by UUID,
+            modified_on TIMESTAMPTZ,
+            modified_by UUID
         );
+
+        -- Backward-compatibility view for singular 'seat_matrix'
+        CREATE OR REPLACE VIEW seat_matrix AS SELECT * FROM seat_matrices;
         """
     )
 
@@ -286,26 +359,40 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_member_view(
+def upsert_seat_matrix(
     cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
 ) -> UpsertResult:
-    """Idempotently upsert a MemberView document."""
-    fields = extract_member_view_fields(doc)
+    """Idempotently upsert a SeatMatrix document."""
+    fields = extract_seat_matrix_fields(doc)
     sql = """
-        INSERT INTO member_views (
+        INSERT INTO seat_matrices (
             id,
+            course_id,
+            course,
+            total_seats,
+            break_up,
             owner_id,
-            membership_id,
-            member_type,
-            issued_books
+            parent_id,
+            created_on,
+            created_by,
+            modified_on,
+            modified_by
         ) VALUES (
-            %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s
         )
         ON CONFLICT (id) DO UPDATE SET
+            course_id = EXCLUDED.course_id,
+            course = EXCLUDED.course,
+            total_seats = EXCLUDED.total_seats,
+            break_up = EXCLUDED.break_up,
             owner_id = EXCLUDED.owner_id,
-            membership_id = EXCLUDED.membership_id,
-            member_type = EXCLUDED.member_type,
-            issued_books = EXCLUDED.issued_books
+            parent_id = EXCLUDED.parent_id,
+            created_on = EXCLUDED.created_on,
+            created_by = EXCLUDED.created_by,
+            modified_on = EXCLUDED.modified_on,
+            modified_by = EXCLUDED.modified_by
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -383,7 +470,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for MemberViews."""
+    """Run the end-to-end migration for SeatMatrices."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -393,26 +480,24 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.member_views_collection}"
+            f"collection={cfg.seat_matrices_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        member_docs = raven_query_collection(
-            requests_session, cfg, cfg.member_views_collection
+        matrix_docs = raven_query_collection(
+            requests_session, cfg, cfg.seat_matrices_collection
         )
 
         # Fallback to singular name if 0 docs fetched with default collection name
-        if not member_docs and cfg.member_views_collection == "MemberViews":
+        if not matrix_docs and cfg.seat_matrices_collection == "SeatMatrices":
             try:
-                alt_docs = raven_query_collection(
-                    requests_session, cfg, "MemberView"
-                )
+                alt_docs = raven_query_collection(requests_session, cfg, "SeatMatrix")
                 if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'MemberView'.")
-                    member_docs = alt_docs
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'SeatMatrix'.")
+                    matrix_docs = alt_docs
             except Exception:
                 pass
 
-        print(f"Fetched member_views={len(member_docs)}")
+        print(f"Fetched seat_matrices={len(matrix_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -431,19 +516,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_views = 0
-        new_views = 0
+        loaded_matrices = 0
+        new_matrices = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting member views...")
-                for d in member_docs:
-                    res = upsert_member_view(cur, d)
-                    loaded_views += 1
-                    new_views += int(res.inserted)
+                print("[4/4] Upserting seat matrices...")
+                for d in matrix_docs:
+                    res = upsert_seat_matrix(cur, d)
+                    loaded_matrices += 1
+                    new_matrices += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -452,7 +537,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.member_views_collection,
+                "collection": cfg.seat_matrices_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -461,14 +546,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "member_views_processed": loaded_views,
-                "new_member_views_inserted": new_views,
+                "seat_matrices_processed": loaded_matrices,
+                "new_seat_matrices_inserted": new_matrices,
             },
         }
 
         print("Migration completed.")
-        print(f"member_views_processed: {loaded_views}")
-        print(f"new_member_views_inserted: {new_views}")
+        print(f"seat_matrices_processed: {loaded_matrices}")
+        print(f"new_seat_matrices_inserted: {new_matrices}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

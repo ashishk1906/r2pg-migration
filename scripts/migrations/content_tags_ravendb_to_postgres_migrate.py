@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract MaterialViews data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL types and JSONB,
+Extract ContentTags data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONB,
 and load into PostgreSQL.
 
 Target table:
-- material_views
+- content_tags
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
@@ -30,17 +29,16 @@ UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
-UUID_NAMESPACE_MATERIAL_VIEWS = uuid.UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")
+UUID_NAMESPACE_CONTENT_TAGS = uuid.UUID("6ba7b818-9dad-11d1-80b4-00c04fd430c8")
 
-MATERIAL_STATUSES = {
-    "active": "Active",
-    "issued": "Issued",
-    "undermaintenance": "UnderMaintenance",
-    "under_maintenance": "UnderMaintenance",
-    "under maintenance": "UnderMaintenance",
-    "disabled": "Disabled",
-    "archived": "Archived",
+CONTENT_TAG_STATUS_MAP: Dict[Any, str] = {
+    0: "Unknown",
+    1: "Active",
+    99: "Disabled",
     "unknown": "Unknown",
+    "active": "Active",
+    "disabled": "Disabled",
+    "inactive": "Disabled",
 }
 
 
@@ -61,7 +59,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    material_views_collection: str
+    content_tags_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -100,12 +98,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate MaterialViews from RavenDB to PostgreSQL"
+        description="Migrate ContentTags from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -126,9 +129,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--material-views-collection",
-        default=os.getenv("MATERIAL_VIEWS_COLLECTION", "MaterialViews"),
-        help="RavenDB collection name for material views (default: MaterialViews)",
+        "--content-tags-collection",
+        default=os.getenv("CONTENT_TAGS_COLLECTION", "ContentTags"),
+        help="RavenDB collection name for content tags (default: ContentTags)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -171,11 +174,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -195,7 +202,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        material_views_collection=args.material_views_collection,
+        content_tags_collection=args.content_tags_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -232,67 +239,12 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_decimal(
-    val: Any, default: Optional[Decimal] = Decimal("0.00")
-) -> Optional[Decimal]:
+def clean_bool(val: Any, default: bool = False) -> bool:
     if val is None:
         return default
-    try:
-        return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.01"))
-    except (InvalidOperation, ValueError, TypeError):
-        return default
-
-
-def clean_int(val: Any, default: Optional[int] = 0) -> Optional[int]:
-    if val is None:
-        return default
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        return default
-
-
-def clean_epoch_ms(val: Any) -> Optional[int]:
-    """Convert epoch milliseconds or ISO timestamp string to integer epoch ms."""
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return int(val)
-    s = str(val).strip()
-    if not s:
-        return None
-    if s.isdigit():
-        try:
-            return int(s)
-        except ValueError:
-            pass
-    # If passed as ISO datetime string
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return int(dt.timestamp() * 1000)
-    except Exception:
-        pass
-    return None
-
-
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
-    if raw_val is None:
-        return []
-    if isinstance(raw_val, list):
-        return [str(item).strip() for item in raw_val if str(item).strip()]
-    if isinstance(raw_val, str):
-        cleaned = raw_val.strip()
-        return [cleaned] if cleaned else []
-    return [str(raw_val)]
-
-
-def map_material_status(raw_val: Any) -> str:
-    """Map string status to material_status_enum."""
-    if raw_val is None:
-        return "Active"
-    norm = str(raw_val).strip().lower()
-    return MATERIAL_STATUSES.get(norm, "Active")
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in {"true", "1", "yes"}
 
 
 def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
@@ -302,68 +254,105 @@ def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     return Json(value)
 
 
+def parse_iso_timestamp(val: Any) -> Optional[datetime]:
+    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
+    if not val:
+        return None
+    text = str(val).strip()
+    if not text:
+        return None
+
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    if "." in normalized:
+        base, frac = normalized.split(".", 1)
+        tz_pos = max(frac.find("+"), frac.find("-"))
+        if tz_pos >= 0:
+            frac_part = frac[:tz_pos]
+            tz_part = frac[tz_pos:]
+        else:
+            frac_part = frac
+            tz_part = ""
+        digits = "".join(ch for ch in frac_part if ch.isdigit())[:6]
+        normalized = f"{base}.{digits}{tz_part}" if digits else f"{base}{tz_part}"
+    if "+" not in normalized[10:] and "-" not in normalized[10:]:
+        normalized = f"{normalized}+00:00"
+
+    try:
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def map_content_tag_status(val: Any) -> str:
+    """Map status string/int to content_tag_status_enum."""
+    if val is None:
+        return "Active"
+    if isinstance(val, int):
+        return CONTENT_TAG_STATUS_MAP.get(val, "Active")
+    s = str(val).strip()
+    if s.isdigit():
+        return CONTENT_TAG_STATUS_MAP.get(int(s), "Active")
+    return CONTENT_TAG_STATUS_MAP.get(s.lower(), "Active")
+
+
 # -----------------------------------------------------------------------------
 # Document Field Extractor (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_material_view_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for material_views table."""
+def extract_content_tag_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for content_tags table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    material_view_id = clean_uuid(raw_id)
-    if not material_view_id and raw_id:
-        material_view_id = str(
-            uuid.uuid5(UUID_NAMESPACE_MATERIAL_VIEWS, str(raw_id).strip())
-        ).lower()
-    if not material_view_id:
-        raise ValueError(f"MaterialView missing valid ID: {raw_id}")
+    tag_id = None
+    if raw_id:
+        clean_raw = str(raw_id).strip()
+        last_part = clean_raw.rsplit("/", 1)[-1]
+        if UUID_RE.fullmatch(last_part):
+            tag_id = last_part.lower()
+        elif UUID_RE.fullmatch(clean_raw):
+            tag_id = clean_raw.lower()
+        else:
+            tag_id = str(
+                uuid.uuid5(UUID_NAMESPACE_CONTENT_TAGS, clean_raw)
+            ).lower()
+    if not tag_id:
+        raise ValueError(f"ContentTag missing valid ID: {raw_id}")
 
-    tracking_id = clean_str(doc.get("TrackingId"), 100)
-    isbn = clean_str(doc.get("ISBN"), 100)
-    title = clean_str(doc.get("Title"))
-    author = clean_str(doc.get("Author"), 255)
-    publisher = clean_str(doc.get("Publisher"), 255)
+    name = clean_str(doc.get("Name"), 255)
+    predefined = clean_bool(doc.get("Predefined"), default=False)
+    csn = clean_str(doc.get("CSN"), 50)
+    meta = as_json(
+        doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {},
+        default_val={},
+    )
+    status = map_content_tag_status(doc.get("Status"))
+
     owner_id = clean_uuid(doc.get("OwnerId"))
-
-    raw_ownership = doc.get("OwnerShip")
-    if isinstance(raw_ownership, list):
-        ownership = as_json(raw_ownership, default_val=[])
-    else:
-        ownership = as_json([], default_val=[])
-
-    location = clean_str(doc.get("Location"), 255)
-
-    raw_attrs = doc.get("Attributes")
-    if isinstance(raw_attrs, dict):
-        attributes = as_json(raw_attrs, default_val={})
-    elif raw_attrs is None:
-        attributes = as_json({}, default_val={})
-    else:
-        attributes = as_json(raw_attrs, default_val={})
-
-    tags = clean_string_list(doc.get("Tags"))
-    value = clean_decimal(doc.get("Value"), default=Decimal("0.00"))
-    status = map_material_status(doc.get("Status"))
-    last_verified_on = clean_epoch_ms(doc.get("LastVerifiedOn"))
-    pages = clean_int(doc.get("Pages"), default=0)
+    parent_id = clean_uuid(doc.get("ParentId"))
+    created_on = parse_iso_timestamp(
+        doc.get("CreatedOn") or metadata.get("@last-modified")
+    ) or datetime.now(timezone.utc)
+    created_by = clean_uuid(doc.get("CreatedBy"))
+    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
+    modified_by = clean_uuid(doc.get("ModifiedBy"))
 
     return (
-        material_view_id,
-        tracking_id,
-        isbn,
-        title,
-        author,
-        publisher,
-        owner_id,
-        ownership,
-        location,
-        attributes,
-        tags,
-        value,
+        tag_id,
+        name,
+        predefined,
+        csn,
+        meta,
         status,
-        last_verified_on,
-        pages,
+        owner_id,
+        parent_id,
+        created_on,
+        created_by,
+        modified_on,
+        modified_by,
     )
 
 
@@ -373,39 +362,33 @@ def extract_material_view_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enum and material_views table without secondary indexes or views."""
+    """Create target enums and content_tags table without secondary indexes or views."""
     cur.execute(
         """
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'material_status_enum') THEN
-                CREATE TYPE material_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'content_tag_status_enum') THEN
+                CREATE TYPE content_tag_status_enum AS ENUM (
                     'Unknown',
                     'Active',
-                    'Issued',
-                    'UnderMaintenance',
-                    'Disabled',
-                    'Archived'
+                    'Disabled'
                 );
             END IF;
         END $$;
 
-        CREATE TABLE IF NOT EXISTS material_views (
+        CREATE TABLE IF NOT EXISTS content_tags (
             id UUID PRIMARY KEY,
-            tracking_id VARCHAR(100),
-            isbn VARCHAR(100),
-            title TEXT,
-            author VARCHAR(255),
-            publisher VARCHAR(255),
+            name VARCHAR(255),
+            predefined BOOLEAN DEFAULT FALSE,
+            csn VARCHAR(50),
+            meta JSONB DEFAULT '{}'::jsonb,
+            status content_tag_status_enum NOT NULL DEFAULT 'Active',
             owner_id UUID,
-            ownership JSONB DEFAULT '[]'::jsonb,
-            location VARCHAR(255),
-            attributes JSONB DEFAULT '{}'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            value NUMERIC(18, 2) DEFAULT 0.00,
-            status material_status_enum NOT NULL DEFAULT 'Active',
-            last_verified_on BIGINT,
-            pages INTEGER DEFAULT 0
+            parent_id UUID,
+            created_on TIMESTAMPTZ,
+            created_by UUID,
+            modified_on TIMESTAMPTZ,
+            modified_by UUID
         );
         """
     )
@@ -416,46 +399,40 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_material_view(
+def upsert_content_tag(
     cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
 ) -> UpsertResult:
-    """Idempotently upsert a MaterialView document."""
-    fields = extract_material_view_fields(doc)
+    """Idempotently upsert a ContentTag document."""
+    fields = extract_content_tag_fields(doc)
     sql = """
-        INSERT INTO material_views (
+        INSERT INTO content_tags (
             id,
-            tracking_id,
-            isbn,
-            title,
-            author,
-            publisher,
-            owner_id,
-            ownership,
-            location,
-            attributes,
-            tags,
-            value,
+            name,
+            predefined,
+            csn,
+            meta,
             status,
-            last_verified_on,
-            pages
+            owner_id,
+            parent_id,
+            created_on,
+            created_by,
+            modified_on,
+            modified_by
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            tracking_id = EXCLUDED.tracking_id,
-            isbn = EXCLUDED.isbn,
-            title = EXCLUDED.title,
-            author = EXCLUDED.author,
-            publisher = EXCLUDED.publisher,
-            owner_id = EXCLUDED.owner_id,
-            ownership = EXCLUDED.ownership,
-            location = EXCLUDED.location,
-            attributes = EXCLUDED.attributes,
-            tags = EXCLUDED.tags,
-            value = EXCLUDED.value,
+            name = EXCLUDED.name,
+            predefined = EXCLUDED.predefined,
+            csn = EXCLUDED.csn,
+            meta = EXCLUDED.meta,
             status = EXCLUDED.status,
-            last_verified_on = EXCLUDED.last_verified_on,
-            pages = EXCLUDED.pages
+            owner_id = EXCLUDED.owner_id,
+            parent_id = EXCLUDED.parent_id,
+            created_on = EXCLUDED.created_on,
+            created_by = EXCLUDED.created_by,
+            modified_on = EXCLUDED.modified_on,
+            modified_by = EXCLUDED.modified_by
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -533,7 +510,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for MaterialViews."""
+    """Run the end-to-end migration for ContentTags."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -543,26 +520,24 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.material_views_collection}"
+            f"collection={cfg.content_tags_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        material_docs = raven_query_collection(
-            requests_session, cfg, cfg.material_views_collection
+        content_tag_docs = raven_query_collection(
+            requests_session, cfg, cfg.content_tags_collection
         )
 
         # Fallback to singular name if 0 docs fetched with default collection name
-        if not material_docs and cfg.material_views_collection == "MaterialViews":
+        if not content_tag_docs and cfg.content_tags_collection == "ContentTags":
             try:
-                alt_docs = raven_query_collection(
-                    requests_session, cfg, "MaterialView"
-                )
+                alt_docs = raven_query_collection(requests_session, cfg, "ContentTag")
                 if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'MaterialView'.")
-                    material_docs = alt_docs
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'ContentTag'.")
+                    content_tag_docs = alt_docs
             except Exception:
                 pass
 
-        print(f"Fetched material_views={len(material_docs)}")
+        print(f"Fetched content_tags={len(content_tag_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -581,19 +556,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_views = 0
-        new_views = 0
+        loaded_tags = 0
+        new_tags = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting material views...")
-                for d in material_docs:
-                    res = upsert_material_view(cur, d)
-                    loaded_views += 1
-                    new_views += int(res.inserted)
+                print("[4/4] Upserting content tags...")
+                for d in content_tag_docs:
+                    res = upsert_content_tag(cur, d)
+                    loaded_tags += 1
+                    new_tags += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -602,7 +577,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.material_views_collection,
+                "collection": cfg.content_tags_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -611,14 +586,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "material_views_processed": loaded_views,
-                "new_material_views_inserted": new_views,
+                "content_tags_processed": loaded_tags,
+                "new_content_tags_inserted": new_tags,
             },
         }
 
         print("Migration completed.")
-        print(f"material_views_processed: {loaded_views}")
-        print(f"new_material_views_inserted: {new_views}")
+        print(f"content_tags_processed: {loaded_tags}")
+        print(f"new_content_tags_inserted: {new_tags}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

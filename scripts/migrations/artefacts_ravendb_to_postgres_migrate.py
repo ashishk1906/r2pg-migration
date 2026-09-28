@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
-Extract Topics data from RavenDB,
+Extract Artefacts and ArtefactTags data from RavenDB,
 transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
-and load into PostgreSQL.
+and load into local PostgreSQL.
 
-Target table:
-- topics
+Target tables:
+- artefact_tags
+- artefacts
 """
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
 import re
 import sys
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -46,7 +48,8 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    topics_collection: str
+    artefacts_collection: str
+    tags_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -85,12 +88,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate Topics from RavenDB to PostgreSQL"
+        description="Migrate Artefacts and ArtefactTags from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -111,9 +119,12 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--topics-collection",
-        default=os.getenv("TOPICS_COLLECTION", "Topics"),
-        help="RavenDB collection name for topics (default: Topics)",
+        "--artefacts-collection",
+        default=os.getenv("ARTEFACTS_COLLECTION", "Artefacts"),
+    )
+    parser.add_argument(
+        "--tags-collection",
+        default=os.getenv("ARTEFACT_TAGS_COLLECTION", "ArtefactTags"),
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -156,11 +167,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -180,7 +195,8 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        topics_collection=args.topics_collection,
+        artefacts_collection=args.artefacts_collection,
+        tags_collection=args.tags_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -217,12 +233,21 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any, default: bool = False) -> bool:
+def clean_bool(val: Any) -> bool:
     if val is None:
-        return default
+        return False
     if isinstance(val, bool):
         return val
     return str(val).strip().lower() in {"true", "1", "yes"}
+
+
+def clean_decimal(val: Any) -> Optional[Decimal]:
+    if val is None:
+        return None
+    try:
+        return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
 
 
 def clean_string_list(raw_val: Any) -> List[str]:
@@ -237,15 +262,15 @@ def clean_string_list(raw_val: Any) -> List[str]:
     return [str(raw_val)]
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
 def parse_iso_timestamp(val: Any) -> Optional[datetime]:
-    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
+    """Parse ISO timestamp safely."""
     if not val:
         return None
     text = str(val).strip()
@@ -280,124 +305,80 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 # Enum Mappings (Exact match to C# Enums)
 # -----------------------------------------------------------------------------
 
-# RoleEnum: Admin = 10, Member = 20
-ROLE_MAP: Dict[Any, str] = {
-    10: "Admin",
-    20: "Member",
-    "admin": "Admin",
-    "administrator": "Admin",
-    "member": "Member",
-    "user": "Member",
-}
-
-# CategoryEnum: PrivateToInstitue = 30, Public = 40
-CATEGORY_MAP: Dict[Any, str] = {
-    30: "PrivateToInstitue",
-    40: "Public",
-    "privatetoinstitue": "PrivateToInstitue",
-    "privatetoinstitute": "PrivateToInstitue",
-    "private_to_institute": "PrivateToInstitue",
-    "private": "PrivateToInstitue",
-    "public": "Public",
-}
-
-# AccessEnum: Open = 50, Restricted = 60
-ACCESS_MAP: Dict[Any, str] = {
-    50: "Open",
-    60: "Restricted",
-    "open": "Open",
-    "restricted": "Restricted",
-    "private": "Restricted",
-}
-
-# TopicStatusEnum: Unknown = 0, Active = 1, Disabled = 99
-TOPIC_STATUS_MAP: Dict[Any, str] = {
+# TagStatusEnum: Unknown = 0, Active = 1, Disabled = 99
+TAG_STATUS_MAP: Dict[Any, str] = {
     0: "Unknown",
     1: "Active",
     99: "Disabled",
     "unknown": "Unknown",
     "active": "Active",
     "disabled": "Disabled",
-    "inactive": "Disabled",
 }
 
 
-def map_topic_role(val: Any) -> str:
-    if val is None:
-        return "Admin"
-    if isinstance(val, int):
-        return ROLE_MAP.get(val, "Admin")
-    s = str(val).strip()
-    if s.isdigit():
-        return ROLE_MAP.get(int(s), "Admin")
-    return ROLE_MAP.get(s.lower(), "Admin")
-
-
-def map_topic_category(val: Any) -> str:
-    if val is None:
-        return "PrivateToInstitue"
-    if isinstance(val, int):
-        return CATEGORY_MAP.get(val, "PrivateToInstitue")
-    s = str(val).strip()
-    if s.isdigit():
-        return CATEGORY_MAP.get(int(s), "PrivateToInstitue")
-    norm = s.lower().replace(" ", "").replace("_", "")
-    return CATEGORY_MAP.get(norm, "PrivateToInstitue")
-
-
-def map_topic_access(val: Any) -> str:
-    if val is None:
-        return "Open"
-    if isinstance(val, int):
-        return ACCESS_MAP.get(val, "Open")
-    s = str(val).strip()
-    if s.isdigit():
-        return ACCESS_MAP.get(int(s), "Open")
-    return ACCESS_MAP.get(s.lower(), "Open")
-
-
-def map_topic_status(val: Any) -> str:
+def map_tag_status(val: Any) -> str:
     if val is None:
         return "Active"
     if isinstance(val, int):
-        return TOPIC_STATUS_MAP.get(val, "Active")
+        return TAG_STATUS_MAP.get(val, "Active")
     s = str(val).strip()
     if s.isdigit():
-        return TOPIC_STATUS_MAP.get(int(s), "Active")
-    return TOPIC_STATUS_MAP.get(s.lower(), "Active")
+        return TAG_STATUS_MAP.get(int(s), "Active")
+    return TAG_STATUS_MAP.get(s.lower(), "Active")
+
+
+# ArtefactStatusEnum: Unknown=0, Active=1, Etl=60, Published=70, PublishedToPublic=75, Uploaded=80, Downloaded=90, Disabled=99
+ARTEFACT_STATUS_MAP: Dict[Any, str] = {
+    0: "Unknown",
+    1: "Active",
+    60: "Etl",
+    70: "Published",
+    75: "PublishedToPublic",
+    80: "Uploaded",
+    90: "Downloaded",
+    99: "Disabled",
+    "unknown": "Unknown",
+    "active": "Active",
+    "etl": "Etl",
+    "published": "Published",
+    "publishedtopublic": "PublishedToPublic",
+    "published_to_public": "PublishedToPublic",
+    "uploaded": "Uploaded",
+    "downloaded": "Downloaded",
+    "disabled": "Disabled",
+}
+
+
+def map_artefact_status(val: Any) -> str:
+    if val is None:
+        return "Active"
+    if isinstance(val, int):
+        return ARTEFACT_STATUS_MAP.get(val, "Active")
+    s = str(val).strip()
+    if s.isdigit():
+        return ARTEFACT_STATUS_MAP.get(int(s), "Active")
+    norm = s.lower().replace(" ", "").replace("_", "")
+    return ARTEFACT_STATUS_MAP.get(norm, "Active")
 
 
 # -----------------------------------------------------------------------------
-# Document Field Extractor (Only RavenDB fields, no metadata columns)
+# Document Field Extractors
 # -----------------------------------------------------------------------------
 
 
-def extract_topic_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for topics table."""
+def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform all fields for artefact_tags table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    topic_id = clean_uuid(raw_id)
-    if not topic_id:
-        raise ValueError(f"Topic missing valid UUID: {raw_id}")
+    tag_id = clean_uuid(raw_id)
+    if not tag_id:
+        raise ValueError(f"ArtefactTag missing valid UUID: {raw_id}")
 
-    main_topic_id = clean_uuid(doc.get("MainTopicId"))
     name = clean_str(doc.get("Name"), 150)
-    friendly_name = clean_str(doc.get("FriendlyName"), 150)
-    description = clean_str(doc.get("Description"))
-
-    role = map_topic_role(doc.get("Role"))
-    category = map_topic_category(doc.get("Category"))
-    access = map_topic_access(doc.get("Access"))
-    subscriptions = as_json(doc.get("Subscriptions"))
-
-    status = map_topic_status(doc.get("Status"))
-    meta = as_json(doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {}, default_val={})
-    tags = clean_string_list(doc.get("Tags"))
-
-    can_unsubscribe = clean_bool(doc.get("CanUnsubscribe"), False)
-    can_publish = clean_bool(doc.get("CanPublish"), False)
-    is_subscription_allowed = clean_bool(doc.get("IsSubscriptionAllowed"), False)
-    handle = clean_str(doc.get("Handle"), 150)
+    predefined = clean_bool(doc.get("Predefined"))
+    csn = clean_str(doc.get("CSN"), 100)
+    meta = as_json(doc.get("Meta") or {})
+    status = map_tag_status(doc.get("Status"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -409,22 +390,86 @@ def extract_topic_fields(doc: Dict[str, Any]) -> Tuple:
     modified_by = clean_uuid(doc.get("ModifiedBy"))
 
     return (
-        topic_id,
-        main_topic_id,
+        tag_id,
         name,
-        friendly_name,
-        description,
-        role,
-        category,
-        access,
-        subscriptions,
-        status,
+        predefined,
+        csn,
         meta,
+        status,
+        owner_id,
+        parent_id,
+        created_on,
+        created_by,
+        modified_on,
+        modified_by,
+    )
+
+
+def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform all fields for artefacts table using JSONBs and TEXT[]."""
+    metadata = doc.get("@metadata") or {}
+    raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
+    art_id = clean_uuid(raw_id)
+    if not art_id:
+        raise ValueError(f"Artefact missing valid UUID: {raw_id}")
+
+    url = clean_str(doc.get("Url"))
+    title = clean_str(doc.get("Title"), 250)
+    description = clean_str(doc.get("Description"))
+    meta_data = as_json(doc.get("MetaData") or {})
+
+    tags = clean_string_list(doc.get("Tags"))
+
+    mime_type = clean_str(doc.get("MimeType"), 100)
+    file_name = clean_str(doc.get("FileName"), 250)
+    file_size = clean_decimal(doc.get("FileSize"))
+    status = map_artefact_status(doc.get("Status"))
+    sha1 = clean_str(doc.get("SHA1"), 100)
+
+    model = clean_str(doc.get("Model"))
+    template = clean_str(doc.get("Template"))
+    csv_val = clean_str(doc.get("Csv"))
+
+    change_set = as_json(doc.get("ChangeSet") if isinstance(doc.get("ChangeSet"), list) else [])
+    comments = as_json(doc.get("Comments") if isinstance(doc.get("Comments"), list) else [])
+    video_links = as_json(doc.get("VideoLinks") if isinstance(doc.get("VideoLinks"), list) else [])
+    data_attributes = as_json(doc.get("DataAttributes") if isinstance(doc.get("DataAttributes"), list) else [])
+
+    published_on = parse_iso_timestamp(doc.get("PublishedOn"))
+    public_urls = clean_string_list(doc.get("PublicUrls"))
+    thumbnails = clean_string_list(doc.get("Thumbnails"))
+
+    owner_id = clean_uuid(doc.get("OwnerId"))
+    parent_id = clean_uuid(doc.get("ParentId"))
+    created_on = parse_iso_timestamp(
+        doc.get("CreatedOn") or metadata.get("@last-modified")
+    ) or datetime.now(timezone.utc)
+    created_by = clean_uuid(doc.get("CreatedBy"))
+    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
+    modified_by = clean_uuid(doc.get("ModifiedBy"))
+
+    return (
+        art_id,
+        url,
+        title,
+        description,
+        meta_data,
         tags,
-        can_unsubscribe,
-        can_publish,
-        is_subscription_allowed,
-        handle,
+        mime_type,
+        file_name,
+        file_size,
+        status,
+        sha1,
+        model,
+        template,
+        csv_val,
+        change_set,
+        comments,
+        video_links,
+        data_attributes,
+        published_on,
+        public_urls,
+        thumbnails,
         owner_id,
         parent_id,
         created_on,
@@ -435,73 +480,46 @@ def extract_topic_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup (Only primary key, no secondary indexes)
+# PostgreSQL Schema Setup
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and topics table without secondary indexes."""
+    """Create target enums, artefact_tags and artefacts tables."""
     cur.execute(
         """
         -- 1. Create Enums
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'topic_role_enum') THEN
-                CREATE TYPE topic_role_enum AS ENUM (
-                    'Admin',
-                    'Member'
-                );
-            END IF;
-
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'topic_category_enum') THEN
-                CREATE TYPE topic_category_enum AS ENUM (
-                    'PrivateToInstitue',
-                    'Public'
-                );
-            END IF;
-
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'topic_access_enum') THEN
-                CREATE TYPE topic_access_enum AS ENUM (
-                    'Open',
-                    'Restricted'
-                );
-            END IF;
-
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'topic_status_enum') THEN
-                CREATE TYPE topic_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tag_status_enum') THEN
+                CREATE TYPE tag_status_enum AS ENUM (
                     'Unknown',
                     'Active',
                     'Disabled'
                 );
             END IF;
-        END $$;
-
-        -- Drop legacy views if they exist to prevent table/view name collisions
-        DO $$
-        BEGIN
-            IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'topics') THEN
-                DROP VIEW topics CASCADE;
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'artefact_status_enum') THEN
+                CREATE TYPE artefact_status_enum AS ENUM (
+                    'Unknown',
+                    'Active',
+                    'Etl',
+                    'Published',
+                    'PublishedToPublic',
+                    'Uploaded',
+                    'Downloaded',
+                    'Disabled'
+                );
             END IF;
         END $$;
 
-        -- 2. Create Target Table (No secondary indexes)
-        CREATE TABLE IF NOT EXISTS topics (
+        -- 2. ArtefactTags Table
+        CREATE TABLE IF NOT EXISTS artefact_tags (
             id UUID PRIMARY KEY,
-            main_topic_id UUID,
             name VARCHAR(150),
-            friendly_name VARCHAR(150),
-            description TEXT,
-            role topic_role_enum NOT NULL DEFAULT 'Admin',
-            category topic_category_enum NOT NULL DEFAULT 'PrivateToInstitue',
-            access topic_access_enum NOT NULL DEFAULT 'Open',
-            subscriptions JSONB,
-            status topic_status_enum NOT NULL DEFAULT 'Active',
+            predefined BOOLEAN DEFAULT FALSE,
+            csn VARCHAR(100),
             meta JSONB DEFAULT '{}'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            can_unsubscribe BOOLEAN DEFAULT FALSE,
-            can_publish BOOLEAN DEFAULT FALSE,
-            is_subscription_allowed BOOLEAN DEFAULT FALSE,
-            handle VARCHAR(150),
+            status tag_status_enum NOT NULL DEFAULT 'Active',
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,
@@ -510,48 +528,112 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        -- Backward-compatibility view for singular 'topic' query
-        CREATE OR REPLACE VIEW topic AS SELECT * FROM topics;
+        -- 3. Artefacts Table
+        CREATE TABLE IF NOT EXISTS artefacts (
+            id UUID PRIMARY KEY,
+            url TEXT,
+            title VARCHAR(250),
+            description TEXT,
+            meta_data JSONB DEFAULT '{}'::jsonb,
+            tags TEXT[] DEFAULT '{}'::text[],
+            mime_type VARCHAR(100),
+            file_name VARCHAR(250),
+            file_size NUMERIC(18, 2),
+            status artefact_status_enum NOT NULL DEFAULT 'Active',
+            sha1 VARCHAR(100),
+            model TEXT,
+            template TEXT,
+            csv TEXT,
+            change_set JSONB DEFAULT '[]'::jsonb,
+            comments JSONB DEFAULT '[]'::jsonb,
+            video_links JSONB DEFAULT '[]'::jsonb,
+            data_attributes JSONB DEFAULT '[]'::jsonb,
+            published_on TIMESTAMPTZ,
+            public_urls TEXT[] DEFAULT '{}'::text[],
+            thumbnails TEXT[] DEFAULT '{}'::text[],
+            owner_id UUID,
+            parent_id UUID,
+            created_on TIMESTAMPTZ NOT NULL,
+            created_by UUID,
+            modified_on TIMESTAMPTZ,
+            modified_by UUID
+        );
         """
     )
 
 
 # -----------------------------------------------------------------------------
-# Database Upsert Operation
+# Database Upsert Operations
 # -----------------------------------------------------------------------------
 
 
-def upsert_topic(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert a Topic document."""
-    fields = extract_topic_fields(doc)
+def upsert_tag(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
+    """Idempotently upsert an ArtefactTag."""
+    fields = extract_tag_fields(doc)
     sql = """
-        INSERT INTO topics (
-            id, main_topic_id, name, friendly_name, description,
-            role, category, access, subscriptions, status,
-            meta, tags, can_unsubscribe, can_publish, is_subscription_allowed,
-            handle, owner_id, parent_id, created_on, created_by, modified_on, modified_by
+        INSERT INTO artefact_tags (
+            id, name, predefined, csn, meta, status,
+            owner_id, parent_id, created_on, created_by, modified_on, modified_by
         ) VALUES (
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            main_topic_id = EXCLUDED.main_topic_id,
             name = EXCLUDED.name,
-            friendly_name = EXCLUDED.friendly_name,
-            description = EXCLUDED.description,
-            role = EXCLUDED.role,
-            category = EXCLUDED.category,
-            access = EXCLUDED.access,
-            subscriptions = EXCLUDED.subscriptions,
-            status = EXCLUDED.status,
+            predefined = EXCLUDED.predefined,
+            csn = EXCLUDED.csn,
             meta = EXCLUDED.meta,
+            status = EXCLUDED.status,
+            owner_id = EXCLUDED.owner_id,
+            parent_id = EXCLUDED.parent_id,
+            created_on = EXCLUDED.created_on,
+            created_by = EXCLUDED.created_by,
+            modified_on = EXCLUDED.modified_on,
+            modified_by = EXCLUDED.modified_by
+        RETURNING (xmax = 0);
+    """
+    cur.execute(sql, fields)
+    row = cur.fetchone()
+    inserted = bool(row[0]) if row else False
+    return UpsertResult(record_id=fields[0], inserted=inserted)
+
+
+def upsert_artefact(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
+    """Idempotently upsert an Artefact."""
+    fields = extract_artefact_fields(doc)
+    sql = """
+        INSERT INTO artefacts (
+            id, url, title, description, meta_data, tags, mime_type, file_name, file_size,
+            status, sha1, model, template, csv, change_set, comments, video_links,
+            data_attributes, published_on, public_urls, thumbnails,
+            owner_id, parent_id, created_on, created_by, modified_on, modified_by
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            url = EXCLUDED.url,
+            title = EXCLUDED.title,
+            description = EXCLUDED.description,
+            meta_data = EXCLUDED.meta_data,
             tags = EXCLUDED.tags,
-            can_unsubscribe = EXCLUDED.can_unsubscribe,
-            can_publish = EXCLUDED.can_publish,
-            is_subscription_allowed = EXCLUDED.is_subscription_allowed,
-            handle = EXCLUDED.handle,
+            mime_type = EXCLUDED.mime_type,
+            file_name = EXCLUDED.file_name,
+            file_size = EXCLUDED.file_size,
+            status = EXCLUDED.status,
+            sha1 = EXCLUDED.sha1,
+            model = EXCLUDED.model,
+            template = EXCLUDED.template,
+            csv = EXCLUDED.csv,
+            change_set = EXCLUDED.change_set,
+            comments = EXCLUDED.comments,
+            video_links = EXCLUDED.video_links,
+            data_attributes = EXCLUDED.data_attributes,
+            published_on = EXCLUDED.published_on,
+            public_urls = EXCLUDED.public_urls,
+            thumbnails = EXCLUDED.thumbnails,
             owner_id = EXCLUDED.owner_id,
             parent_id = EXCLUDED.parent_id,
             created_on = EXCLUDED.created_on,
@@ -635,7 +717,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for Topics."""
+    """Run the end-to-end migration for artefact tags and artefacts."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -645,26 +727,20 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.topics_collection}"
+            f"collections=({cfg.tags_collection}, {cfg.artefacts_collection})"
         )
-        print("[1/4] Fetching RavenDB documents...")
-        topic_docs = raven_query_collection(
-            requests_session, cfg, cfg.topics_collection
+        print("[1/5] Fetching RavenDB documents...")
+        tag_docs = raven_query_collection(
+            requests_session, cfg, cfg.tags_collection
+        )
+        art_docs = raven_query_collection(
+            requests_session, cfg, cfg.artefacts_collection
+        )
+        print(
+            f"Fetched artefact_tags={len(tag_docs)}, artefacts={len(art_docs)}"
         )
 
-        # Fallback to singular name if 0 docs fetched with default collection name
-        if not topic_docs and cfg.topics_collection == "Topics":
-            try:
-                alt_docs = raven_query_collection(requests_session, cfg, "Topic")
-                if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'Topic'.")
-                    topic_docs = alt_docs
-            except Exception:
-                pass
-
-        print(f"Fetched topics={len(topic_docs)}")
-
-        print("[2/4] Connecting PostgreSQL...")
+        print("[2/5] Connecting PostgreSQL...")
         print(
             f"PostgreSQL target: host={cfg.pg_host}, port={cfg.pg_port}, "
             f"db={cfg.pg_db}, user={cfg.pg_user}"
@@ -681,19 +757,34 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_topics = 0
-        new_topics = 0
+        loaded_tags = 0
+        new_tags = 0
+        loaded_arts = 0
+        new_arts = 0
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/4] Ensuring target schema...")
+                print("[3/5] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting topics...")
-                for d in topic_docs:
-                    res = upsert_topic(cur, d)
-                    loaded_topics += 1
-                    new_topics += int(res.inserted)
+                print("[4/5] Upserting artefact tags...")
+                for d in tag_docs:
+                    res = upsert_tag(cur, d)
+                    loaded_tags += 1
+                    new_tags += int(res.inserted)
+
+                print("[5/5] Upserting artefacts...")
+                for d in art_docs:
+                    res = upsert_artefact(cur, d)
+                    loaded_arts += 1
+                    new_arts += int(res.inserted)
+
+        # Post-load verification counts
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM artefact_tags")
+            total_tags = int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM artefacts")
+            total_artefacts = int(cur.fetchone()[0])
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -702,7 +793,8 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.topics_collection,
+                "tags_collection": cfg.tags_collection,
+                "artefacts_collection": cfg.artefacts_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -711,14 +803,22 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "topics_processed": loaded_topics,
-                "new_topics_inserted": new_topics,
+                "tags_processed": loaded_tags,
+                "new_tags_inserted": new_tags,
+                "artefacts_processed": loaded_arts,
+                "new_artefacts_inserted": new_arts,
+            },
+            "post_load_counts": {
+                "artefact_tags": total_tags,
+                "artefacts": total_artefacts,
             },
         }
 
         print("Migration completed.")
-        print(f"topics_processed: {loaded_topics}")
-        print(f"new_topics_inserted: {new_topics}")
+        print(f"artefacts_tags_processed: {loaded_tags}")
+        print(f"new_artefacts_tags_inserted: {new_tags}")
+        print(f"artefacts_processed: {loaded_arts}")
+        print(f"new_artefacts_inserted: {new_arts}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

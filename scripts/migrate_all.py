@@ -245,7 +245,9 @@ def main():
 
     for name, script_file in MODULE_SCRIPTS:
         if name in selected_modules:
-            script_full_path = scripts_dir / script_file
+            script_full_path = scripts_dir / "migrations" / script_file
+            if not script_full_path.exists():
+                script_full_path = scripts_dir / script_file
             if not script_full_path.exists():
                 print(f"[!] Warning: Script {script_file} not found. Skipping.")
                 failure_count += 1

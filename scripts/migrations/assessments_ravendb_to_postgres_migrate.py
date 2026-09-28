@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Extract SeatMatrices data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL types and JSONBs,
+Extract Assessments and AssessmentTags data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
 and load into PostgreSQL.
 
-Target table:
-- seat_matrices (with backward-compatible view: seat_matrix)
+Target tables:
+- assessment_tags
+- assessments
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from pathlib import Path
 import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
-import uuid
 
 import psycopg2
 from psycopg2.extras import Json
@@ -28,8 +28,6 @@ import requests
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
-
-UUID_NAMESPACE_SEAT_MATRICES = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 
 # -----------------------------------------------------------------------------
@@ -49,7 +47,8 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    seat_matrices_collection: str
+    assessments_collection: str
+    tags_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -88,12 +87,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate SeatMatrices from RavenDB to PostgreSQL"
+        description="Migrate Assessments and AssessmentTags from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -114,9 +118,14 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--seat-matrices-collection",
-        default=os.getenv("SEAT_MATRICES_COLLECTION", "SeatMatrices"),
-        help="RavenDB collection name for seat matrices (default: SeatMatrices)",
+        "--assessments-collection",
+        default=os.getenv("ASSESSMENTS_COLLECTION", "Assessments"),
+        help="RavenDB collection name for assessments (default: Assessments)",
+    )
+    parser.add_argument(
+        "--tags-collection",
+        default=os.getenv("ASSESSMENT_TAGS_COLLECTION", "AssessmentTags"),
+        help="RavenDB collection name for assessment tags (default: AssessmentTags)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -159,11 +168,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -183,7 +196,8 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        seat_matrices_collection=args.seat_matrices_collection,
+        assessments_collection=args.assessments_collection,
+        tags_collection=args.tags_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -220,19 +234,39 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
+def clean_bool(val: Any) -> bool:
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in {"true", "1", "yes"}
+
+
 def clean_int(val: Any) -> Optional[int]:
     if val is None:
         return None
     try:
-        return int(val)
+        return int(float(str(val).strip()))
     except (ValueError, TypeError):
         return None
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def clean_string_list(raw_val: Any) -> List[str]:
+    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+    if raw_val is None:
+        return []
+    if isinstance(raw_val, list):
+        return [str(item).strip() for item in raw_val if str(item).strip()]
+    if isinstance(raw_val, str):
+        cleaned = raw_val.strip()
+        return [cleaned] if cleaned else []
+    return [str(raw_val)]
+
+
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -269,27 +303,80 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 
 
 # -----------------------------------------------------------------------------
-# Document Field Extractor (Only RavenDB fields, no metadata columns)
+# Enum Mappings (Exact match to C# Enums)
+# -----------------------------------------------------------------------------
+
+# TagStatusEnum: Unknown = 0, Active = 1, Disabled = 99
+TAG_STATUS_MAP: Dict[Any, str] = {
+    0: "Unknown",
+    1: "Active",
+    99: "Disabled",
+    "unknown": "Unknown",
+    "active": "Active",
+    "disabled": "Disabled",
+    "inactive": "Disabled",
+}
+
+
+def map_tag_status(val: Any) -> str:
+    if val is None:
+        return "Active"
+    if isinstance(val, int):
+        return TAG_STATUS_MAP.get(val, "Active")
+    s = str(val).strip()
+    if s.isdigit():
+        return TAG_STATUS_MAP.get(int(s), "Active")
+    return TAG_STATUS_MAP.get(s.lower(), "Active")
+
+
+# AssessmentStatusEnum: Unknown=0, Active=1, WIP=40, Published=50, Archived=80, Disabled=99
+ASSESSMENT_STATUS_MAP: Dict[Any, str] = {
+    0: "Unknown",
+    1: "Active",
+    40: "Wip",
+    50: "Published",
+    80: "Archived",
+    99: "Disabled",
+    "unknown": "Unknown",
+    "active": "Active",
+    "wip": "Wip",
+    "published": "Published",
+    "archived": "Archived",
+    "disabled": "Disabled",
+    "inactive": "Disabled",
+}
+
+
+def map_assessment_status(val: Any) -> str:
+    if val is None:
+        return "Active"
+    if isinstance(val, int):
+        return ASSESSMENT_STATUS_MAP.get(val, "Active")
+    s = str(val).strip()
+    if s.isdigit():
+        return ASSESSMENT_STATUS_MAP.get(int(s), "Active")
+    norm = s.lower().replace(" ", "").replace("_", "")
+    return ASSESSMENT_STATUS_MAP.get(norm, "Active")
+
+
+# -----------------------------------------------------------------------------
+# Document Field Extractors (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_seat_matrix_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for seat_matrices table."""
+def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for assessment_tags table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    seat_matrix_id = clean_uuid(raw_id)
-    if not seat_matrix_id and raw_id:
-        seat_matrix_id = str(
-            uuid.uuid5(UUID_NAMESPACE_SEAT_MATRICES, str(raw_id).strip())
-        ).lower()
-    if not seat_matrix_id:
-        raise ValueError(f"SeatMatrix missing valid UUID: {raw_id}")
+    tag_id = clean_uuid(raw_id)
+    if not tag_id:
+        raise ValueError(f"AssessmentTag missing valid UUID: {raw_id}")
 
-    course_id = clean_uuid(doc.get("CourseId"))
-    course = clean_str(doc.get("Course"), 255)
-    total_seats = clean_int(doc.get("TotalSeats"))
-    break_up_raw = doc.get("BreakUp")
-    break_up = as_json(break_up_raw if isinstance(break_up_raw, list) else [], default_val=[])
+    name = clean_str(doc.get("Name"), 150)
+    predefined = clean_bool(doc.get("Predefined"))
+    csn = clean_str(doc.get("CSN"), 100)
+    meta = as_json(doc.get("Meta") or {})
+    status = map_tag_status(doc.get("Status"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -301,11 +388,60 @@ def extract_seat_matrix_fields(doc: Dict[str, Any]) -> Tuple:
     modified_by = clean_uuid(doc.get("ModifiedBy"))
 
     return (
-        seat_matrix_id,
-        course_id,
-        course,
-        total_seats,
-        break_up,
+        tag_id,
+        name,
+        predefined,
+        csn,
+        meta,
+        status,
+        owner_id,
+        parent_id,
+        created_on,
+        created_by,
+        modified_on,
+        modified_by,
+    )
+
+
+def extract_assessment_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for assessments table."""
+    metadata = doc.get("@metadata") or {}
+    raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
+    art_id = clean_uuid(raw_id)
+    if not art_id:
+        raise ValueError(f"Assessment missing valid UUID: {raw_id}")
+
+    total_marks = clean_int(doc.get("TotalMarks"))
+    description = clean_str(doc.get("Description"))
+    subject = clean_str(doc.get("Subject"), 150)
+    subject_code = clean_str(doc.get("SubjectCode"), 50)
+    duration = clean_int(doc.get("Duration"))
+
+    sections = as_json(doc.get("Sections") if isinstance(doc.get("Sections"), list) else [])
+    status = map_assessment_status(doc.get("Status"))
+    multiple_attempts = clean_bool(doc.get("MultipleAttempts"))
+    tags = clean_string_list(doc.get("Tags"))
+
+    owner_id = clean_uuid(doc.get("OwnerId"))
+    parent_id = clean_uuid(doc.get("ParentId"))
+    created_on = parse_iso_timestamp(
+        doc.get("CreatedOn") or metadata.get("@last-modified")
+    ) or datetime.now(timezone.utc)
+    created_by = clean_uuid(doc.get("CreatedBy"))
+    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
+    modified_by = clean_uuid(doc.get("ModifiedBy"))
+
+    return (
+        art_id,
+        total_marks,
+        description,
+        subject,
+        subject_code,
+        duration,
+        sections,
+        status,
+        multiple_attempts,
+        tags,
         owner_id,
         parent_id,
         created_on,
@@ -316,21 +452,44 @@ def extract_seat_matrix_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup (Only primary key, no secondary indexes)
+# PostgreSQL Schema Setup (Only primary keys, no secondary indexes)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create seat_matrices table without secondary indexes."""
+    """Create target enums, assessment_tags and assessments tables."""
     cur.execute(
         """
-        -- 1. Create Target Table (No secondary indexes)
-        CREATE TABLE IF NOT EXISTS seat_matrices (
+        -- 1. Create Enums
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tag_status_enum') THEN
+                CREATE TYPE tag_status_enum AS ENUM (
+                    'Unknown',
+                    'Active',
+                    'Disabled'
+                );
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'assessment_status_enum') THEN
+                CREATE TYPE assessment_status_enum AS ENUM (
+                    'Unknown',
+                    'Active',
+                    'Wip',
+                    'Published',
+                    'Archived',
+                    'Disabled'
+                );
+            END IF;
+        END $$;
+
+        -- 2. AssessmentTags Table (No secondary indexes)
+        CREATE TABLE IF NOT EXISTS assessment_tags (
             id UUID PRIMARY KEY,
-            course_id UUID,
-            course VARCHAR(255),
-            total_seats INT,
-            break_up JSONB DEFAULT '[]'::jsonb,
+            name VARCHAR(150),
+            predefined BOOLEAN DEFAULT FALSE,
+            csn VARCHAR(100),
+            meta JSONB DEFAULT '{}'::jsonb,
+            status tag_status_enum NOT NULL DEFAULT 'Active',
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,
@@ -339,45 +498,88 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        -- Backward-compatibility view for singular 'seat_matrix'
-        CREATE OR REPLACE VIEW seat_matrix AS SELECT * FROM seat_matrices;
+        -- 3. Assessments Table (No secondary indexes)
+        CREATE TABLE IF NOT EXISTS assessments (
+            id UUID PRIMARY KEY,
+            total_marks INT,
+            description TEXT,
+            subject VARCHAR(150),
+            subject_code VARCHAR(50),
+            duration INT,
+            sections JSONB DEFAULT '[]'::jsonb,
+            status assessment_status_enum NOT NULL DEFAULT 'Active',
+            multiple_attempts BOOLEAN DEFAULT FALSE,
+            tags TEXT[] DEFAULT '{}'::text[],
+            owner_id UUID,
+            parent_id UUID,
+            created_on TIMESTAMPTZ NOT NULL,
+            created_by UUID,
+            modified_on TIMESTAMPTZ,
+            modified_by UUID
+        );
         """
     )
 
 
 # -----------------------------------------------------------------------------
-# Database Upsert Operation
+# Database Upsert Operations
 # -----------------------------------------------------------------------------
 
 
-def upsert_seat_matrix(
-    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
-) -> UpsertResult:
-    """Idempotently upsert a SeatMatrix document."""
-    fields = extract_seat_matrix_fields(doc)
+def upsert_assessment_tag(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
+    """Idempotently upsert an AssessmentTag."""
+    fields = extract_tag_fields(doc)
     sql = """
-        INSERT INTO seat_matrices (
-            id,
-            course_id,
-            course,
-            total_seats,
-            break_up,
-            owner_id,
-            parent_id,
-            created_on,
-            created_by,
-            modified_on,
-            modified_by
+        INSERT INTO assessment_tags (
+            id, name, predefined, csn, meta, status,
+            owner_id, parent_id, created_on, created_by, modified_on, modified_by
         ) VALUES (
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s,
-            %s
+            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            course_id = EXCLUDED.course_id,
-            course = EXCLUDED.course,
-            total_seats = EXCLUDED.total_seats,
-            break_up = EXCLUDED.break_up,
+            name = EXCLUDED.name,
+            predefined = EXCLUDED.predefined,
+            csn = EXCLUDED.csn,
+            meta = EXCLUDED.meta,
+            status = EXCLUDED.status,
+            owner_id = EXCLUDED.owner_id,
+            parent_id = EXCLUDED.parent_id,
+            created_on = EXCLUDED.created_on,
+            created_by = EXCLUDED.created_by,
+            modified_on = EXCLUDED.modified_on,
+            modified_by = EXCLUDED.modified_by
+        RETURNING (xmax = 0);
+    """
+    cur.execute(sql, fields)
+    row = cur.fetchone()
+    inserted = bool(row[0]) if row else False
+    return UpsertResult(record_id=fields[0], inserted=inserted)
+
+
+def upsert_assessment(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
+    """Idempotently upsert an Assessment."""
+    fields = extract_assessment_fields(doc)
+    sql = """
+        INSERT INTO assessments (
+            id, total_marks, description, subject, subject_code, duration,
+            sections, status, multiple_attempts, tags,
+            owner_id, parent_id, created_on, created_by, modified_on, modified_by
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            total_marks = EXCLUDED.total_marks,
+            description = EXCLUDED.description,
+            subject = EXCLUDED.subject,
+            subject_code = EXCLUDED.subject_code,
+            duration = EXCLUDED.duration,
+            sections = EXCLUDED.sections,
+            status = EXCLUDED.status,
+            multiple_attempts = EXCLUDED.multiple_attempts,
+            tags = EXCLUDED.tags,
             owner_id = EXCLUDED.owner_id,
             parent_id = EXCLUDED.parent_id,
             created_on = EXCLUDED.created_on,
@@ -461,7 +663,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for SeatMatrices."""
+    """Run the end-to-end migration for assessment tags and assessments."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -471,26 +673,20 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.seat_matrices_collection}"
+            f"collections=({cfg.tags_collection}, {cfg.assessments_collection})"
         )
-        print("[1/4] Fetching RavenDB documents...")
-        matrix_docs = raven_query_collection(
-            requests_session, cfg, cfg.seat_matrices_collection
+        print("[1/5] Fetching RavenDB documents...")
+        tag_docs = raven_query_collection(
+            requests_session, cfg, cfg.tags_collection
+        )
+        assessment_docs = raven_query_collection(
+            requests_session, cfg, cfg.assessments_collection
+        )
+        print(
+            f"Fetched assessment_tags={len(tag_docs)}, assessments={len(assessment_docs)}"
         )
 
-        # Fallback to singular name if 0 docs fetched with default collection name
-        if not matrix_docs and cfg.seat_matrices_collection == "SeatMatrices":
-            try:
-                alt_docs = raven_query_collection(requests_session, cfg, "SeatMatrix")
-                if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'SeatMatrix'.")
-                    matrix_docs = alt_docs
-            except Exception:
-                pass
-
-        print(f"Fetched seat_matrices={len(matrix_docs)}")
-
-        print("[2/4] Connecting PostgreSQL...")
+        print("[2/5] Connecting PostgreSQL...")
         print(
             f"PostgreSQL target: host={cfg.pg_host}, port={cfg.pg_port}, "
             f"db={cfg.pg_db}, user={cfg.pg_user}"
@@ -507,19 +703,34 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_matrices = 0
-        new_matrices = 0
+        loaded_tags = 0
+        new_tags = 0
+        loaded_ass = 0
+        new_ass = 0
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/4] Ensuring target schema...")
+                print("[3/5] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting seat matrices...")
-                for d in matrix_docs:
-                    res = upsert_seat_matrix(cur, d)
-                    loaded_matrices += 1
-                    new_matrices += int(res.inserted)
+                print("[4/5] Upserting assessment tags...")
+                for d in tag_docs:
+                    res = upsert_assessment_tag(cur, d)
+                    loaded_tags += 1
+                    new_tags += int(res.inserted)
+
+                print("[5/5] Upserting assessments...")
+                for d in assessment_docs:
+                    res = upsert_assessment(cur, d)
+                    loaded_ass += 1
+                    new_ass += int(res.inserted)
+
+        # Post-load verification counts
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM assessment_tags")
+            total_tags = int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM assessments")
+            total_assessments = int(cur.fetchone()[0])
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -528,7 +739,8 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.seat_matrices_collection,
+                "tags_collection": cfg.tags_collection,
+                "assessments_collection": cfg.assessments_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -537,14 +749,22 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "seat_matrices_processed": loaded_matrices,
-                "new_seat_matrices_inserted": new_matrices,
+                "tags_processed": loaded_tags,
+                "new_tags_inserted": new_tags,
+                "assessments_processed": loaded_ass,
+                "new_assessments_inserted": new_ass,
+            },
+            "post_load_counts": {
+                "assessment_tags": total_tags,
+                "assessments": total_assessments,
             },
         }
 
         print("Migration completed.")
-        print(f"seat_matrices_processed: {loaded_matrices}")
-        print(f"new_seat_matrices_inserted: {new_matrices}")
+        print(f"assessment_tags_processed: {loaded_tags}")
+        print(f"new_assessment_tags_inserted: {new_tags}")
+        print(f"assessments_processed: {loaded_ass}")
+        print(f"new_assessments_inserted: {new_ass}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

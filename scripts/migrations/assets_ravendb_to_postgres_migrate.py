@@ -115,9 +115,14 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
         description="Migrate AssetViews data from RavenDB to PostgreSQL"
@@ -162,7 +167,7 @@ def parse_args() -> Config:
         "--summary-json-path",
         default=os.getenv(
             "ASSETS_SUMMARY_JSON_PATH",
-            os.path.join(script_dir, "..", "validation", "assets_migration_summary.json"),
+            os.path.join(script_dir, "..", "..", "validation", "assets_migration_summary.json"),
         ),
     )
     parser.add_argument(
@@ -185,13 +190,18 @@ def parse_args() -> Config:
         parser.error("Missing PostgreSQL password. Provide --pg-password or set PG_PASSWORD.")
 
     if args.raven_cert_file:
-        cert_path = args.raven_cert_file
-        if not os.path.isfile(cert_path):
-            candidate = os.path.join(script_dir, cert_path)
-            if os.path.isfile(candidate):
-                args.raven_cert_file = candidate
+        if not os.path.isfile(args.raven_cert_file):
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
-                parser.error(f"RavenDB cert file not found: {args.raven_cert_file}")
+                parser.error(f"Raven cert file not found: {args.raven_cert_file}")
 
     return Config(
         raven_url=args.raven_url.rstrip("/"),

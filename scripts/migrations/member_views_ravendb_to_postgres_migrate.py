@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract Staffs data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
+Extract MemberViews data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL types and JSONB,
 and load into PostgreSQL.
 
 Target table:
-- staff (with backward-compatible view: staffs)
+- member_views
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 import psycopg2
 from psycopg2.extras import Json
@@ -27,6 +28,8 @@ import requests
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
+
+UUID_NAMESPACE_MEMBER_VIEWS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 
 # -----------------------------------------------------------------------------
@@ -46,7 +49,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    staffs_collection: str
+    member_views_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -85,12 +88,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate Staffs from RavenDB to PostgreSQL"
+        description="Migrate MemberViews from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -111,9 +119,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--staffs-collection",
-        default=os.getenv("STAFFS_COLLECTION", "Staffs"),
-        help="RavenDB collection name for staffs (default: Staffs)",
+        "--member-views-collection",
+        default=os.getenv("MEMBER_VIEWS_COLLECTION", "MemberViews"),
+        help="RavenDB collection name for member views (default: MemberViews)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -156,11 +164,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -180,7 +192,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        staffs_collection=args.staffs_collection,
+        member_views_collection=args.member_views_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -217,18 +229,6 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
-    if raw_val is None:
-        return []
-    if isinstance(raw_val, list):
-        return [str(item).strip() for item in raw_val if str(item).strip()]
-    if isinstance(raw_val, str):
-        cleaned = raw_val.strip()
-        return [cleaned] if cleaned else []
-    return [str(raw_val)]
-
-
 def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
@@ -236,244 +236,56 @@ def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     return Json(value)
 
 
-def parse_iso_timestamp(val: Any) -> Optional[datetime]:
-    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
-    if not val:
-        return None
-    text = str(val).strip()
-    if not text:
-        return None
-
-    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
-    if "." in normalized:
-        base, frac = normalized.split(".", 1)
-        tz_pos = max(frac.find("+"), frac.find("-"))
-        if tz_pos >= 0:
-            frac_part = frac[:tz_pos]
-            tz_part = frac[tz_pos:]
-        else:
-            frac_part = frac
-            tz_part = ""
-        digits = "".join(ch for ch in frac_part if ch.isdigit())[:6]
-        normalized = f"{base}.{digits}{tz_part}" if digits else f"{base}{tz_part}"
-    if "+" not in normalized[10:] and "-" not in normalized[10:]:
-        normalized = f"{normalized}+00:00"
-
-    try:
-        dt = datetime.fromisoformat(normalized)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-# -----------------------------------------------------------------------------
-# Enum Mappings (Exact match to C# Enums)
-# -----------------------------------------------------------------------------
-
-STAFF_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "disabled": "Disabled",
-    "inactive": "Disabled",
-}
-
-STAFF_GENDER_MAP: Dict[str, str] = {
-    "female": "Female",
-    "f": "Female",
-    "male": "Male",
-    "m": "Male",
-    "other": "Other",
-    "noinfo": "NoInfo",
-    "unknown": "NoInfo",
-}
-
-
-def map_staff_status(val: Any) -> str:
-    if val is None:
-        return "Active"
-    if isinstance(val, int):
-        return STAFF_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return STAFF_STATUS_MAP.get(int(s), "Active")
-    return STAFF_STATUS_MAP.get(s.lower(), "Active")
-
-
-def map_staff_gender(val: Any) -> str:
-    if val is None:
-        return "NoInfo"
-    s = str(val).strip().lower()
-    return STAFF_GENDER_MAP.get(s, "NoInfo")
-
-
 # -----------------------------------------------------------------------------
 # Document Field Extractor (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_staff_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for staff table."""
+def extract_member_view_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for member_views table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    staff_id = clean_uuid(raw_id)
-    if not staff_id:
-        raise ValueError(f"Staff missing valid UUID: {raw_id}")
-
-    inst_id = clean_uuid(doc.get("InstId"))
-    doj = parse_iso_timestamp(doc.get("DOJ"))
-    designations = as_json(doc.get("Designations") if isinstance(doc.get("Designations"), list) else [], default_val=[])
-    status = map_staff_status(doc.get("Status"))
-    employment_history = as_json(doc.get("EmploymentHistory") if isinstance(doc.get("EmploymentHistory"), list) else [], default_val=[])
-    course_subject_list = as_json(doc.get("CourseSubjectList") if isinstance(doc.get("CourseSubjectList"), list) else [], default_val=[])
-    alias = clean_str(doc.get("Alias"), 200)
-    class_teacher = as_json(doc.get("ClassTeacher") if isinstance(doc.get("ClassTeacher"), dict) else {}, default_val={})
-    ref_id = clean_str(doc.get("RefId"), 100)
-    user_id = clean_uuid(doc.get("UserId"))
-    salaries = as_json(doc.get("Salaries") if isinstance(doc.get("Salaries"), list) else [], default_val=[])
-    payslips = as_json(doc.get("Payslips") if isinstance(doc.get("Payslips"), list) else [], default_val=[])
-
-    first_name = clean_str(doc.get("FirstName"), 150)
-    middle_name = clean_str(doc.get("MiddleName"), 150)
-    last_name = clean_str(doc.get("LastName"), 150)
-    name = clean_str(doc.get("Name"), 250)
-    title = clean_str(doc.get("Title"), 50)
-    gender = map_staff_gender(doc.get("Gender"))
-    dob = parse_iso_timestamp(doc.get("DOB"))
-    email = clean_str(doc.get("Email"), 255)
-    mobile = clean_str(doc.get("Mobile"), 50)
-    virtual_id = clean_str(doc.get("VirtualId"), 255)
-
-    contacts = as_json(doc.get("Contacts") if isinstance(doc.get("Contacts"), list) else [], default_val=[])
-    addresses = as_json(doc.get("Addresses") if isinstance(doc.get("Addresses"), list) else [], default_val=[])
-    tags = clean_string_list(doc.get("Tags"))
-    attributes = as_json(doc.get("Attributes") if isinstance(doc.get("Attributes"), dict) else {}, default_val={})
+    member_view_id = clean_uuid(raw_id)
+    if not member_view_id and raw_id:
+        member_view_id = str(
+            uuid.uuid5(UUID_NAMESPACE_MEMBER_VIEWS, str(raw_id).strip())
+        ).lower()
+    if not member_view_id:
+        raise ValueError(f"MemberView missing valid ID: {raw_id}")
 
     owner_id = clean_uuid(doc.get("OwnerId"))
-    parent_id = clean_uuid(doc.get("ParentId"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
-    created_by = clean_uuid(doc.get("CreatedBy"))
-    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
-    modified_by = clean_uuid(doc.get("ModifiedBy"))
+    membership_id = clean_str(doc.get("MembershipId"), 100)
+    member_type = clean_str(doc.get("MemberType"), 50)
+    issued_books = as_json(
+        doc.get("IssuedBooks") if isinstance(doc.get("IssuedBooks"), list) else [],
+        default_val=[],
+    )
 
     return (
-        staff_id,
-        inst_id,
-        doj,
-        designations,
-        status,
-        employment_history,
-        course_subject_list,
-        alias,
-        class_teacher,
-        ref_id,
-        user_id,
-        salaries,
-        payslips,
-        first_name,
-        middle_name,
-        last_name,
-        name,
-        title,
-        gender,
-        dob,
-        email,
-        mobile,
-        virtual_id,
-        contacts,
-        addresses,
-        tags,
-        attributes,
+        member_view_id,
         owner_id,
-        parent_id,
-        created_on,
-        created_by,
-        modified_on,
-        modified_by,
+        membership_id,
+        member_type,
+        issued_books,
     )
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup (Only primary key, no secondary indexes)
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes, no views)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and staff table without secondary indexes."""
+    """Create target member_views table without secondary indexes or views."""
     cur.execute(
         """
-        -- 1. Create Enums
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'staff_gender_enum') THEN
-                CREATE TYPE staff_gender_enum AS ENUM (
-                    'Female',
-                    'Male',
-                    'Other',
-                    'NoInfo'
-                );
-            ELSE
-                BEGIN
-                    ALTER TYPE staff_gender_enum ADD VALUE IF NOT EXISTS 'Other';
-                EXCEPTION WHEN OTHERS THEN
-                    NULL;
-                END;
-            END IF;
-
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'staff_status_enum') THEN
-                CREATE TYPE staff_status_enum AS ENUM (
-                    'Unknown',
-                    'Active',
-                    'Disabled'
-                );
-            END IF;
-        END $$;
-
-        -- 2. Create Target Table (No secondary indexes)
-        CREATE TABLE IF NOT EXISTS staff (
+        CREATE TABLE IF NOT EXISTS member_views (
             id UUID PRIMARY KEY,
-            inst_id UUID,
-            doj TIMESTAMPTZ,
-            designations JSONB DEFAULT '[]'::jsonb,
-            status staff_status_enum NOT NULL DEFAULT 'Active',
-            employment_history JSONB DEFAULT '[]'::jsonb,
-            course_subject_list JSONB DEFAULT '[]'::jsonb,
-            alias VARCHAR(200),
-            class_teacher JSONB DEFAULT '{}'::jsonb,
-            ref_id VARCHAR(100),
-            user_id UUID,
-            salaries JSONB DEFAULT '[]'::jsonb,
-            payslips JSONB DEFAULT '[]'::jsonb,
-            first_name VARCHAR(150),
-            middle_name VARCHAR(150),
-            last_name VARCHAR(150),
-            name VARCHAR(250),
-            title VARCHAR(50),
-            gender staff_gender_enum NOT NULL DEFAULT 'NoInfo',
-            dob TIMESTAMPTZ,
-            email VARCHAR(255),
-            mobile VARCHAR(50),
-            virtual_id VARCHAR(255),
-            contacts JSONB DEFAULT '[]'::jsonb,
-            addresses JSONB DEFAULT '[]'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            attributes JSONB DEFAULT '{}'::jsonb,
             owner_id UUID,
-            parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
-            created_by UUID,
-            modified_on TIMESTAMPTZ,
-            modified_by UUID
+            membership_id VARCHAR(100),
+            member_type VARCHAR(50),
+            issued_books JSONB DEFAULT '[]'::jsonb
         );
-
-        -- Backward-compatibility view for plural 'staffs' query
-        CREATE OR REPLACE VIEW staffs AS SELECT * FROM staff;
         """
     )
 
@@ -483,60 +295,26 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_staff(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert a Staff document."""
-    fields = extract_staff_fields(doc)
+def upsert_member_view(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert a MemberView document."""
+    fields = extract_member_view_fields(doc)
     sql = """
-        INSERT INTO staff (
-            id, inst_id, doj, designations, status,
-            employment_history, course_subject_list, alias, class_teacher,
-            ref_id, user_id, salaries, payslips,
-            first_name, middle_name, last_name, name, title, gender,
-            dob, email, mobile, virtual_id,
-            contacts, addresses, tags, attributes,
-            owner_id, parent_id, created_on, created_by, modified_on, modified_by
+        INSERT INTO member_views (
+            id,
+            owner_id,
+            membership_id,
+            member_type,
+            issued_books
         ) VALUES (
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            inst_id = EXCLUDED.inst_id,
-            doj = EXCLUDED.doj,
-            designations = EXCLUDED.designations,
-            status = EXCLUDED.status,
-            employment_history = EXCLUDED.employment_history,
-            course_subject_list = EXCLUDED.course_subject_list,
-            alias = EXCLUDED.alias,
-            class_teacher = EXCLUDED.class_teacher,
-            ref_id = EXCLUDED.ref_id,
-            user_id = EXCLUDED.user_id,
-            salaries = EXCLUDED.salaries,
-            payslips = EXCLUDED.payslips,
-            first_name = EXCLUDED.first_name,
-            middle_name = EXCLUDED.middle_name,
-            last_name = EXCLUDED.last_name,
-            name = EXCLUDED.name,
-            title = EXCLUDED.title,
-            gender = EXCLUDED.gender,
-            dob = EXCLUDED.dob,
-            email = EXCLUDED.email,
-            mobile = EXCLUDED.mobile,
-            virtual_id = EXCLUDED.virtual_id,
-            contacts = EXCLUDED.contacts,
-            addresses = EXCLUDED.addresses,
-            tags = EXCLUDED.tags,
-            attributes = EXCLUDED.attributes,
             owner_id = EXCLUDED.owner_id,
-            parent_id = EXCLUDED.parent_id,
-            created_on = EXCLUDED.created_on,
-            created_by = EXCLUDED.created_by,
-            modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by
+            membership_id = EXCLUDED.membership_id,
+            member_type = EXCLUDED.member_type,
+            issued_books = EXCLUDED.issued_books
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -614,7 +392,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for Staffs."""
+    """Run the end-to-end migration for MemberViews."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -624,24 +402,26 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.staffs_collection}"
+            f"collection={cfg.member_views_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        staff_docs = raven_query_collection(
-            requests_session, cfg, cfg.staffs_collection
+        member_docs = raven_query_collection(
+            requests_session, cfg, cfg.member_views_collection
         )
 
         # Fallback to singular name if 0 docs fetched with default collection name
-        if not staff_docs and cfg.staffs_collection == "Staffs":
+        if not member_docs and cfg.member_views_collection == "MemberViews":
             try:
-                alt_docs = raven_query_collection(requests_session, cfg, "Staff")
+                alt_docs = raven_query_collection(
+                    requests_session, cfg, "MemberView"
+                )
                 if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'Staff'.")
-                    staff_docs = alt_docs
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'MemberView'.")
+                    member_docs = alt_docs
             except Exception:
                 pass
 
-        print(f"Fetched staffs={len(staff_docs)}")
+        print(f"Fetched member_views={len(member_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -660,19 +440,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_staffs = 0
-        new_staffs = 0
+        loaded_views = 0
+        new_views = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting staffs...")
-                for d in staff_docs:
-                    res = upsert_staff(cur, d)
-                    loaded_staffs += 1
-                    new_staffs += int(res.inserted)
+                print("[4/4] Upserting member views...")
+                for d in member_docs:
+                    res = upsert_member_view(cur, d)
+                    loaded_views += 1
+                    new_views += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -681,7 +461,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.staffs_collection,
+                "collection": cfg.member_views_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -690,14 +470,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "staffs_processed": loaded_staffs,
-                "new_staffs_inserted": new_staffs,
+                "member_views_processed": loaded_views,
+                "new_member_views_inserted": new_views,
             },
         }
 
         print("Migration completed.")
-        print(f"staffs_processed: {loaded_staffs}")
-        print(f"new_staffs_inserted: {new_staffs}")
+        print(f"member_views_processed: {loaded_views}")
+        print(f"new_member_views_inserted: {new_views}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

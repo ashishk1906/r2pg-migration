@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Extract Receipts data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
+Extract InventoryItemViews and InventoryJournalViews data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONB,
 and load into PostgreSQL.
 
-Target table:
-- receipts
+Target tables:
+- inventory_item_views
+- inventory_journal_views
 """
 
 from __future__ import annotations
@@ -30,7 +31,33 @@ UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
-UUID_NAMESPACE_RECEIPTS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+UUID_NAMESPACE_INVENTORY_ITEMS = uuid.UUID("6ba7b813-9dad-11d1-80b4-00c04fd430c8")
+UUID_NAMESPACE_INVENTORY_JOURNALS = uuid.UUID("6ba7b814-9dad-11d1-80b4-00c04fd430c8")
+
+INVENTORY_STATUS_MAP: Dict[Any, str] = {
+    "active": "Active",
+    "disabled": "Disabled",
+    "archived": "Archived",
+    "unknown": "Unknown",
+    "1": "Active",
+    "99": "Disabled",
+    1: "Active",
+    99: "Disabled",
+}
+
+INVENTORY_TYPE_MAP: Dict[str, str] = {
+    "item": "Item",
+    "group": "Group",
+    "unknown": "Unknown",
+}
+
+JOURNAL_ENTRY_TYPE_MAP: Dict[str, str] = {
+    "cr": "Cr",
+    "credit": "Cr",
+    "dr": "Dr",
+    "debit": "Dr",
+    "unknown": "Unknown",
+}
 
 
 # -----------------------------------------------------------------------------
@@ -50,7 +77,8 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    receipts_collection: str
+    inventory_item_views_collection: str
+    inventory_journal_views_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -89,12 +117,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate Receipts from RavenDB to PostgreSQL"
+        description="Migrate Inventory data from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -115,9 +148,14 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--receipts-collection",
-        default=os.getenv("RECEIPTS_COLLECTION", "Receipts"),
-        help="RavenDB collection name for receipts (default: Receipts)",
+        "--inventory-item-views-collection",
+        default=os.getenv("INVENTORY_ITEM_VIEWS_COLLECTION", "InventoryItemViews"),
+        help="RavenDB collection name for inventory item views (default: InventoryItemViews)",
+    )
+    parser.add_argument(
+        "--inventory-journal-views-collection",
+        default=os.getenv("INVENTORY_JOURNAL_VIEWS_COLLECTION", "InventoryJournalViews"),
+        help="RavenDB collection name for inventory journal views (default: InventoryJournalViews)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -160,11 +198,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -184,7 +226,8 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        receipts_collection=args.receipts_collection,
+        inventory_item_views_collection=args.inventory_item_views_collection,
+        inventory_journal_views_collection=args.inventory_journal_views_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -221,36 +264,38 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any, default: bool = False) -> bool:
+def clean_decimal(
+    val: Any, default: Optional[Decimal] = Decimal("0.00")
+) -> Optional[Decimal]:
     if val is None:
-        return default
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() in {"true", "1", "yes"}
-
-
-def clean_int(val: Any) -> Optional[int]:
-    if val is None:
-        return None
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        return None
-
-
-def clean_decimal(val: Any, default: Optional[Decimal] = None) -> Optional[Decimal]:
-    """Parse numeric/decimal value into Decimal(18, 2)."""
-    if val is None:
-        return default
-    if isinstance(val, Decimal):
-        return val.quantize(Decimal("0.01"))
-    text = str(val).strip().replace(",", "")
-    if not text:
         return default
     try:
-        return Decimal(text).quantize(Decimal("0.01"))
+        return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.01"))
     except (InvalidOperation, ValueError, TypeError):
         return default
+
+
+def clean_quantity(
+    val: Any, default: Optional[Decimal] = Decimal("0.0000")
+) -> Optional[Decimal]:
+    if val is None:
+        return default
+    try:
+        return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.0001"))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
+
+
+def clean_string_list(raw_val: Any) -> List[str]:
+    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+    if raw_val is None:
+        return []
+    if isinstance(raw_val, list):
+        return [str(item).strip() for item in raw_val if str(item).strip()]
+    if isinstance(raw_val, str):
+        cleaned = raw_val.strip()
+        return [cleaned] if cleaned else []
+    return [str(raw_val)]
 
 
 def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
@@ -292,305 +337,276 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-# -----------------------------------------------------------------------------
-# Enum Mappings (Exact match to C# Enums)
-# -----------------------------------------------------------------------------
-
-PAYMENT_MODE_MAP: Dict[Any, str] = {
-    10: "Cash",
-    20: "Cheque",
-    30: "DemandDraft",
-    40: "NetBanking",
-    50: "UPI",
-    "cash": "Cash",
-    "cheque": "Cheque",
-    "check": "Cheque",
-    "dd": "DemandDraft",
-    "demanddraft": "DemandDraft",
-    "demand_draft": "DemandDraft",
-    "netbanking": "NetBanking",
-    "net_banking": "NetBanking",
-    "online": "NetBanking",
-    "card": "NetBanking",
-    "upi": "UPI",
-    "other": "Other",
-    "unknown": "Unknown",
-}
-
-RECEIPT_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    99: "Cancelled",
-    "active": "Active",
-    "cancelled": "Cancelled",
-    "canceled": "Cancelled",
-    "disabled": "Cancelled",
-    "inactive": "Cancelled",
-    "unknown": "Unknown",
-}
-
-RECEIPT_TYPE_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    10: "Regular",
-    20: "Donation",
-    "regular": "Regular",
-    "donation": "Donation",
-    "unknown": "Unknown",
-}
-
-
-def map_payment_mode(val: Any) -> str:
-    if val is None:
-        return "Cash"
-    if isinstance(val, int):
-        return PAYMENT_MODE_MAP.get(val, "Cash")
-    s = str(val).strip()
-    if s.isdigit():
-        return PAYMENT_MODE_MAP.get(int(s), "Cash")
-    norm = s.lower().replace(" ", "").replace("_", "")
-    return PAYMENT_MODE_MAP.get(norm, "Cash")
-
-
-def map_receipt_status(val: Any) -> str:
-    if val is None:
+def map_inventory_status(raw_val: Any) -> str:
+    """Map status string/int to inventory_status_enum."""
+    if raw_val is None:
         return "Active"
-    if isinstance(val, int):
-        return RECEIPT_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return RECEIPT_STATUS_MAP.get(int(s), "Active")
-    norm = s.lower().replace(" ", "").replace("_", "")
-    return RECEIPT_STATUS_MAP.get(norm, "Active")
+    if isinstance(raw_val, int):
+        return INVENTORY_STATUS_MAP.get(raw_val, "Active")
+    norm = str(raw_val).strip().lower()
+    return INVENTORY_STATUS_MAP.get(norm, "Active")
 
 
-def map_receipt_type(val: Any) -> str:
-    if val is None:
-        return "Regular"
-    if isinstance(val, int):
-        return RECEIPT_TYPE_MAP.get(val, "Regular")
-    s = str(val).strip()
-    if s.isdigit():
-        return RECEIPT_TYPE_MAP.get(int(s), "Regular")
-    norm = s.lower().replace(" ", "").replace("_", "")
-    return RECEIPT_TYPE_MAP.get(norm, "Regular")
+def map_inventory_type(raw_val: Any) -> str:
+    """Map inventory type string to inventory_type_enum."""
+    if raw_val is None:
+        return "Item"
+    norm = str(raw_val).strip().lower()
+    return INVENTORY_TYPE_MAP.get(norm, "Item")
+
+
+def map_journal_entry_type(raw_val: Any) -> str:
+    """Map journal entry type string to journal_entry_type_enum."""
+    if raw_val is None:
+        return "Cr"
+    norm = str(raw_val).strip().lower()
+    return JOURNAL_ENTRY_TYPE_MAP.get(norm, "Cr")
 
 
 # -----------------------------------------------------------------------------
-# Document Field Extractor (Only RavenDB fields, no metadata columns)
+# Document Field Extractors (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_receipt_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for receipts table."""
+def extract_inventory_item_view_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for inventory_item_views table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    receipt_id = clean_uuid(raw_id)
-    if not receipt_id and raw_id:
-        receipt_id = str(
-            uuid.uuid5(UUID_NAMESPACE_RECEIPTS, str(raw_id).strip())
+    item_id = clean_uuid(raw_id)
+    if not item_id and raw_id:
+        item_id = str(
+            uuid.uuid5(UUID_NAMESPACE_INVENTORY_ITEMS, str(raw_id).strip())
         ).lower()
-    if not receipt_id:
-        raise ValueError(f"Receipt missing valid ID: {raw_id}")
+    if not item_id:
+        raise ValueError(f"InventoryItemView missing valid ID: {raw_id}")
 
-    number = clean_str(doc.get("Number"), 50)
-    inst_id = clean_uuid(doc.get("InstId"))
-    date_val = parse_iso_timestamp(doc.get("Date"))
-
-    customer = as_json(doc.get("Customer") if isinstance(doc.get("Customer"), dict) else {}, default_val={})
-    order_items = as_json(doc.get("OrderItems") if isinstance(doc.get("OrderItems"), list) else [], default_val=[])
-
-    total_amount = clean_decimal(doc.get("TotalAmount"), default=Decimal("0.00"))
-    received_by = clean_str(doc.get("ReceivedBy"), 150)
-    payment_mode = map_payment_mode(doc.get("PaymentMode"))
-
-    fin_inst = doc.get("FinancialInstrument")
-    financial_instrument = as_json(fin_inst) if fin_inst is not None else None
-
-    status = map_receipt_status(doc.get("Status"))
-    receipt_type = map_receipt_type(doc.get("ReceiptType"))
-    revenue_sharing_enabled = clean_bool(doc.get("RevenueSharingEnabled"), default=False)
-    # In .NET ct.gr Receipt.cs: public int RevenueShare { get; set; }
-    revenue_share = clean_int(doc.get("RevenueShare")) or 0
-
-    meta = as_json(doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {}, default_val={})
-    html = clean_str(doc.get("HTML"))
-    # In .NET ct.gr Receipt.cs: public string RefNo { get; set; }
-    ref_no = clean_str(doc.get("RefNo"), 100)
-
+    name = clean_str(doc.get("Name"), 255)
+    group_id = clean_uuid(doc.get("GroupId"))
+    inventory_type = map_inventory_type(doc.get("InventoryType"))
+    uom = clean_str(doc.get("UOM"), 50)
     owner_id = clean_uuid(doc.get("OwnerId"))
-    parent_id = clean_uuid(doc.get("ParentId"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
-    created_by = clean_uuid(doc.get("CreatedBy"))
-    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
-    modified_by = clean_uuid(doc.get("ModifiedBy"))
+    tags = clean_string_list(doc.get("Tags"))
+    attributes = as_json(
+        doc.get("Attributes") if isinstance(doc.get("Attributes"), dict) else {},
+        default_val={},
+    )
+    status = map_inventory_status(doc.get("Status"))
 
     return (
-        receipt_id,
-        number,
-        inst_id,
-        date_val,
-        customer,
-        order_items,
-        total_amount,
-        received_by,
-        payment_mode,
-        financial_instrument,
-        status,
-        receipt_type,
-        revenue_sharing_enabled,
-        revenue_share,
-        meta,
-        html,
-        ref_no,
+        item_id,
+        name,
+        group_id,
+        inventory_type,
+        uom,
         owner_id,
-        parent_id,
-        created_on,
-        created_by,
-        modified_on,
-        modified_by,
+        tags,
+        attributes,
+        status,
+    )
+
+
+def extract_inventory_journal_view_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for inventory_journal_views table."""
+    metadata = doc.get("@metadata") or {}
+    raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
+    journal_id = clean_uuid(raw_id)
+    if not journal_id and raw_id:
+        journal_id = str(
+            uuid.uuid5(UUID_NAMESPACE_INVENTORY_JOURNALS, str(raw_id).strip())
+        ).lower()
+    if not journal_id:
+        raise ValueError(f"InventoryJournalView missing valid ID: {raw_id}")
+
+    owner_id = clean_uuid(doc.get("OwnerId"))
+    inventory_item_id = clean_uuid(doc.get("InventoryItemId"))
+    name = clean_str(doc.get("Name"), 255)
+    date_val = parse_iso_timestamp(doc.get("Date"))
+    uom = clean_str(doc.get("UOM"), 50)
+    quantity = clean_quantity(doc.get("Quantity"), default=Decimal("0.0000"))
+    rate = clean_decimal(doc.get("Rate"), default=Decimal("0.00"))
+    particulars = clean_str(doc.get("Particulars"))
+    reference = clean_str(doc.get("Reference"), 255)
+    inventory_journal_id = clean_uuid(doc.get("InventoryJournalId"))
+    accounting_journal_id = clean_uuid(doc.get("AccountingJournalId"))
+    party_id = clean_uuid(doc.get("PartyId"))
+    party_name = clean_str(doc.get("PartyName"), 255)
+    journal_entry_type = map_journal_entry_type(doc.get("JournalEntryType"))
+    status = map_inventory_status(doc.get("Status"))
+
+    return (
+        journal_id,
+        owner_id,
+        inventory_item_id,
+        name,
+        date_val,
+        uom,
+        quantity,
+        rate,
+        particulars,
+        reference,
+        inventory_journal_id,
+        accounting_journal_id,
+        party_id,
+        party_name,
+        journal_entry_type,
+        status,
     )
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup (Only primary key, no secondary indexes)
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes, no views)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and receipts table without secondary indexes."""
+    """Create target enums and inventory tables without secondary indexes or views."""
     cur.execute(
         """
-        -- 1. Create or extend Enums
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'receipt_payment_mode_enum') THEN
-                CREATE TYPE receipt_payment_mode_enum AS ENUM (
-                    'Cash',
-                    'Cheque',
-                    'DemandDraft',
-                    'NetBanking',
-                    'UPI',
-                    'Other',
-                    'Unknown'
-                );
-            END IF;
-
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'receipt_status_enum') THEN
-                CREATE TYPE receipt_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'inventory_status_enum') THEN
+                CREATE TYPE inventory_status_enum AS ENUM (
+                    'Unknown',
                     'Active',
-                    'Cancelled',
                     'Disabled',
-                    'Unknown'
+                    'Archived'
                 );
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'receipt_type_enum') THEN
-                CREATE TYPE receipt_type_enum AS ENUM (
-                    'Regular',
-                    'Donation',
-                    'Unknown'
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'inventory_type_enum') THEN
+                CREATE TYPE inventory_type_enum AS ENUM (
+                    'Unknown',
+                    'Item',
+                    'Group'
+                );
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'journal_entry_type_enum') THEN
+                CREATE TYPE journal_entry_type_enum AS ENUM (
+                    'Unknown',
+                    'Cr',
+                    'Dr'
                 );
             END IF;
         END $$;
 
-        -- 2. Create Target Table (No secondary indexes)
-        CREATE TABLE IF NOT EXISTS receipts (
+        CREATE TABLE IF NOT EXISTS inventory_item_views (
             id UUID PRIMARY KEY,
-            number VARCHAR(50),
-            inst_id UUID,
-            date TIMESTAMPTZ,
-            customer JSONB DEFAULT '{}'::jsonb,
-            order_items JSONB DEFAULT '[]'::jsonb,
-            total_amount NUMERIC(18, 2),
-            received_by VARCHAR(150),
-            payment_mode receipt_payment_mode_enum NOT NULL DEFAULT 'Cash',
-            financial_instrument JSONB,
-            status receipt_status_enum NOT NULL DEFAULT 'Active',
-            receipt_type receipt_type_enum NOT NULL DEFAULT 'Regular',
-            revenue_sharing_enabled BOOLEAN DEFAULT FALSE,
-            revenue_share INTEGER DEFAULT 0,
-            meta JSONB DEFAULT '{}'::jsonb,
-            html TEXT,
-            ref_no VARCHAR(100),
+            name VARCHAR(255),
+            group_id UUID,
+            inventory_type inventory_type_enum NOT NULL DEFAULT 'Item',
+            uom VARCHAR(50),
             owner_id UUID,
-            parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
-            created_by UUID,
-            modified_on TIMESTAMPTZ,
-            modified_by UUID
+            tags TEXT[] DEFAULT '{}'::text[],
+            attributes JSONB DEFAULT '{}'::jsonb,
+            status inventory_status_enum NOT NULL DEFAULT 'Active'
         );
 
-        -- Backward-compatibility view for singular 'receipt'
-        CREATE OR REPLACE VIEW receipt AS SELECT * FROM receipts;
+        CREATE TABLE IF NOT EXISTS inventory_journal_views (
+            id UUID PRIMARY KEY,
+            owner_id UUID,
+            inventory_item_id UUID,
+            name VARCHAR(255),
+            date TIMESTAMPTZ,
+            uom VARCHAR(50),
+            quantity NUMERIC(18, 4) DEFAULT 0.0000,
+            rate NUMERIC(18, 2) DEFAULT 0.00,
+            particulars TEXT,
+            reference VARCHAR(255),
+            inventory_journal_id UUID,
+            accounting_journal_id UUID,
+            party_id UUID,
+            party_name VARCHAR(255),
+            journal_entry_type journal_entry_type_enum NOT NULL DEFAULT 'Cr',
+            status inventory_status_enum NOT NULL DEFAULT 'Active'
+        );
         """
     )
 
 
 # -----------------------------------------------------------------------------
-# Database Upsert Operation
+# Database Upsert Operations
 # -----------------------------------------------------------------------------
 
 
-def upsert_receipt(
+def upsert_inventory_item_view(
     cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
 ) -> UpsertResult:
-    """Idempotently upsert a Receipt document."""
-    fields = extract_receipt_fields(doc)
+    """Idempotently upsert an InventoryItemView document."""
+    fields = extract_inventory_item_view_fields(doc)
     sql = """
-        INSERT INTO receipts (
+        INSERT INTO inventory_item_views (
             id,
-            number,
-            inst_id,
-            date,
-            customer,
-            order_items,
-            total_amount,
-            received_by,
-            payment_mode,
-            financial_instrument,
-            status,
-            receipt_type,
-            revenue_sharing_enabled,
-            revenue_share,
-            meta,
-            html,
-            ref_no,
+            name,
+            group_id,
+            inventory_type,
+            uom,
             owner_id,
-            parent_id,
-            created_on,
-            created_by,
-            modified_on,
-            modified_by
+            tags,
+            attributes,
+            status
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
-            number = EXCLUDED.number,
-            inst_id = EXCLUDED.inst_id,
-            date = EXCLUDED.date,
-            customer = EXCLUDED.customer,
-            order_items = EXCLUDED.order_items,
-            total_amount = EXCLUDED.total_amount,
-            received_by = EXCLUDED.received_by,
-            payment_mode = EXCLUDED.payment_mode,
-            financial_instrument = EXCLUDED.financial_instrument,
-            status = EXCLUDED.status,
-            receipt_type = EXCLUDED.receipt_type,
-            revenue_sharing_enabled = EXCLUDED.revenue_sharing_enabled,
-            revenue_share = EXCLUDED.revenue_share,
-            meta = EXCLUDED.meta,
-            html = EXCLUDED.html,
-            ref_no = EXCLUDED.ref_no,
+            name = EXCLUDED.name,
+            group_id = EXCLUDED.group_id,
+            inventory_type = EXCLUDED.inventory_type,
+            uom = EXCLUDED.uom,
             owner_id = EXCLUDED.owner_id,
-            parent_id = EXCLUDED.parent_id,
-            created_on = EXCLUDED.created_on,
-            created_by = EXCLUDED.created_by,
-            modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by
+            tags = EXCLUDED.tags,
+            attributes = EXCLUDED.attributes,
+            status = EXCLUDED.status
+        RETURNING (xmax = 0);
+    """
+    cur.execute(sql, fields)
+    row = cur.fetchone()
+    inserted = bool(row[0]) if row else False
+    return UpsertResult(record_id=fields[0], inserted=inserted)
+
+
+def upsert_inventory_journal_view(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert an InventoryJournalView document."""
+    fields = extract_inventory_journal_view_fields(doc)
+    sql = """
+        INSERT INTO inventory_journal_views (
+            id,
+            owner_id,
+            inventory_item_id,
+            name,
+            date,
+            uom,
+            quantity,
+            rate,
+            particulars,
+            reference,
+            inventory_journal_id,
+            accounting_journal_id,
+            party_id,
+            party_name,
+            journal_entry_type,
+            status
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            owner_id = EXCLUDED.owner_id,
+            inventory_item_id = EXCLUDED.inventory_item_id,
+            name = EXCLUDED.name,
+            date = EXCLUDED.date,
+            uom = EXCLUDED.uom,
+            quantity = EXCLUDED.quantity,
+            rate = EXCLUDED.rate,
+            particulars = EXCLUDED.particulars,
+            reference = EXCLUDED.reference,
+            inventory_journal_id = EXCLUDED.inventory_journal_id,
+            accounting_journal_id = EXCLUDED.accounting_journal_id,
+            party_id = EXCLUDED.party_id,
+            party_name = EXCLUDED.party_name,
+            journal_entry_type = EXCLUDED.journal_entry_type,
+            status = EXCLUDED.status
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -668,7 +684,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for Receipts."""
+    """Run the end-to-end migration for Inventory tables."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -677,25 +693,36 @@ def main() -> int:
         configure_raven_session(requests_session, cfg)
 
         print(
-            f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.receipts_collection}"
+            f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}\n"
+            f"  - items collection: {cfg.inventory_item_views_collection}\n"
+            f"  - journals collection: {cfg.inventory_journal_views_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        receipt_docs = raven_query_collection(
-            requests_session, cfg, cfg.receipts_collection
+        item_docs = raven_query_collection(
+            requests_session, cfg, cfg.inventory_item_views_collection
         )
-
-        # Fallback to singular name if 0 docs fetched with default collection name
-        if not receipt_docs and cfg.receipts_collection == "Receipts":
+        if not item_docs and cfg.inventory_item_views_collection == "InventoryItemViews":
             try:
-                alt_docs = raven_query_collection(requests_session, cfg, "Receipt")
+                alt_docs = raven_query_collection(requests_session, cfg, "InventoryItemView")
                 if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'Receipt'.")
-                    receipt_docs = alt_docs
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'InventoryItemView'.")
+                    item_docs = alt_docs
             except Exception:
                 pass
 
-        print(f"Fetched receipts={len(receipt_docs)}")
+        journal_docs = raven_query_collection(
+            requests_session, cfg, cfg.inventory_journal_views_collection
+        )
+        if not journal_docs and cfg.inventory_journal_views_collection == "InventoryJournalViews":
+            try:
+                alt_docs = raven_query_collection(requests_session, cfg, "InventoryJournalView")
+                if alt_docs:
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'InventoryJournalView'.")
+                    journal_docs = alt_docs
+            except Exception:
+                pass
+
+        print(f"Fetched inventory_items={len(item_docs)}, inventory_journals={len(journal_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -714,19 +741,27 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_receipts = 0
-        new_receipts = 0
+        loaded_items = 0
+        new_items = 0
+        loaded_journals = 0
+        new_journals = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting receipts...")
-                for d in receipt_docs:
-                    res = upsert_receipt(cur, d)
-                    loaded_receipts += 1
-                    new_receipts += int(res.inserted)
+                print("[4/4] Upserting inventory items...")
+                for d in item_docs:
+                    res = upsert_inventory_item_view(cur, d)
+                    loaded_items += 1
+                    new_items += int(res.inserted)
+
+                print("[4/4] Upserting inventory journals...")
+                for d in journal_docs:
+                    res = upsert_inventory_journal_view(cur, d)
+                    loaded_journals += 1
+                    new_journals += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -735,7 +770,10 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.receipts_collection,
+                "collections": [
+                    cfg.inventory_item_views_collection,
+                    cfg.inventory_journal_views_collection,
+                ],
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -744,14 +782,16 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "receipts_processed": loaded_receipts,
-                "new_receipts_inserted": new_receipts,
+                "inventory_item_views_processed": loaded_items,
+                "new_inventory_item_views_inserted": new_items,
+                "inventory_journal_views_processed": loaded_journals,
+                "new_inventory_journal_views_inserted": new_journals,
             },
         }
 
         print("Migration completed.")
-        print(f"receipts_processed: {loaded_receipts}")
-        print(f"new_receipts_inserted: {new_receipts}")
+        print(f"inventory_item_views_processed: {loaded_items} (new: {new_items})")
+        print(f"inventory_journal_views_processed: {loaded_journals} (new: {new_journals})")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

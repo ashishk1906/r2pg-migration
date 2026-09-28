@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract VoucherViews data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
+Extract MaterialViews data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL types and JSONB,
 and load into PostgreSQL.
 
 Target table:
-- voucher_views
+- material_views
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 import psycopg2
 from psycopg2.extras import Json
@@ -28,6 +29,19 @@ import requests
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
+
+UUID_NAMESPACE_MATERIAL_VIEWS = uuid.UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")
+
+MATERIAL_STATUSES = {
+    "active": "Active",
+    "issued": "Issued",
+    "undermaintenance": "UnderMaintenance",
+    "under_maintenance": "UnderMaintenance",
+    "under maintenance": "UnderMaintenance",
+    "disabled": "Disabled",
+    "archived": "Archived",
+    "unknown": "Unknown",
+}
 
 
 # -----------------------------------------------------------------------------
@@ -47,7 +61,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    vouchers_collection: str
+    material_views_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -86,12 +100,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate VoucherViews from RavenDB to PostgreSQL"
+        description="Migrate MaterialViews from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -112,9 +131,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--vouchers-collection",
-        default=os.getenv("VOUCHERS_COLLECTION", "VoucherViews"),
-        help="RavenDB collection name for vouchers (default: VoucherViews)",
+        "--material-views-collection",
+        default=os.getenv("MATERIAL_VIEWS_COLLECTION", "MaterialViews"),
+        help="RavenDB collection name for material views (default: MaterialViews)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -157,11 +176,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -181,7 +204,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        vouchers_collection=args.vouchers_collection,
+        material_views_collection=args.material_views_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -218,13 +241,47 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_decimal(val: Any) -> Optional[Decimal]:
+def clean_decimal(
+    val: Any, default: Optional[Decimal] = Decimal("0.00")
+) -> Optional[Decimal]:
     if val is None:
-        return None
+        return default
     try:
         return Decimal(str(val).strip().replace(",", "")).quantize(Decimal("0.01"))
     except (InvalidOperation, ValueError, TypeError):
+        return default
+
+
+def clean_int(val: Any, default: Optional[int] = 0) -> Optional[int]:
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def clean_epoch_ms(val: Any) -> Optional[int]:
+    """Convert epoch milliseconds or ISO timestamp string to integer epoch ms."""
+    if val is None:
         return None
+    if isinstance(val, (int, float)):
+        return int(val)
+    s = str(val).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        try:
+            return int(s)
+        except ValueError:
+            pass
+    # If passed as ISO datetime string
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        pass
+    return None
 
 
 def clean_string_list(raw_val: Any) -> List[str]:
@@ -239,6 +296,14 @@ def clean_string_list(raw_val: Any) -> List[str]:
     return [str(raw_val)]
 
 
+def map_material_status(raw_val: Any) -> str:
+    """Map string status to material_status_enum."""
+    if raw_val is None:
+        return "Active"
+    norm = str(raw_val).strip().lower()
+    return MATERIAL_STATUSES.get(norm, "Active")
+
+
 def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
@@ -246,200 +311,111 @@ def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
     return Json(value)
 
 
-def parse_iso_timestamp(val: Any) -> Optional[datetime]:
-    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
-    if not val:
-        return None
-    text = str(val).strip()
-    if not text:
-        return None
-
-    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
-    if "." in normalized:
-        base, frac = normalized.split(".", 1)
-        tz_pos = max(frac.find("+"), frac.find("-"))
-        if tz_pos >= 0:
-            frac_part = frac[:tz_pos]
-            tz_part = frac[tz_pos:]
-        else:
-            frac_part = frac
-            tz_part = ""
-        digits = "".join(ch for ch in frac_part if ch.isdigit())[:6]
-        normalized = f"{base}.{digits}{tz_part}" if digits else f"{base}{tz_part}"
-    if "+" not in normalized[10:] and "-" not in normalized[10:]:
-        normalized = f"{normalized}+00:00"
-
-    try:
-        dt = datetime.fromisoformat(normalized)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-# -----------------------------------------------------------------------------
-# Enum Mappings
-# -----------------------------------------------------------------------------
-
-VOUCHER_TYPE_MAP: Dict[str, str] = {
-    "expense": "Expense",
-    "income": "Income",
-    "journal": "Journal",
-    "contra": "Contra",
-    "payment": "Payment",
-    "receipt": "Receipt",
-}
-
-VOUCHER_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    99: "Disabled",
-    "unknown": "Unknown",
-    "active": "Active",
-    "disabled": "Disabled",
-    "inactive": "Disabled",
-}
-
-
-def map_voucher_type(val: Any) -> str:
-    if val is None:
-        return "Expense"
-    s = str(val).strip()
-    return VOUCHER_TYPE_MAP.get(s.lower(), s.capitalize() if s else "Expense")
-
-
-def map_voucher_status(val: Any) -> str:
-    if val is None:
-        return "Active"
-    if isinstance(val, int):
-        return VOUCHER_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return VOUCHER_STATUS_MAP.get(int(s), "Active")
-    return VOUCHER_STATUS_MAP.get(s.lower(), "Active")
-
-
 # -----------------------------------------------------------------------------
 # Document Field Extractor (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
 
 
-def extract_voucher_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for voucher_views table."""
+def extract_material_view_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for material_views table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    voucher_id = clean_uuid(raw_id)
-    if not voucher_id:
-        raise ValueError(f"VoucherView missing valid UUID: {raw_id}")
+    material_view_id = clean_uuid(raw_id)
+    if not material_view_id and raw_id:
+        material_view_id = str(
+            uuid.uuid5(UUID_NAMESPACE_MATERIAL_VIEWS, str(raw_id).strip())
+        ).lower()
+    if not material_view_id:
+        raise ValueError(f"MaterialView missing valid ID: {raw_id}")
 
+    tracking_id = clean_str(doc.get("TrackingId"), 100)
+    isbn = clean_str(doc.get("ISBN"), 100)
+    title = clean_str(doc.get("Title"))
+    author = clean_str(doc.get("Author"), 255)
+    publisher = clean_str(doc.get("Publisher"), 255)
     owner_id = clean_uuid(doc.get("OwnerId"))
-    description = clean_str(doc.get("Description"))
-    ref_no = clean_str(doc.get("RefNo"), 100)
-    voucher_no = clean_str(doc.get("VoucherNo"), 100)
-    voucher_type = map_voucher_type(doc.get("Type"))
-    date_val = parse_iso_timestamp(doc.get("Date"))
 
-    by_val = as_json(doc.get("By") if isinstance(doc.get("By"), list) else [], default_val=[])
-    to_val = as_json(doc.get("To") if isinstance(doc.get("To"), list) else [], default_val=[])
-    by_total = clean_decimal(doc.get("ByTotal"))
-    to_total = clean_decimal(doc.get("ToTotal"))
+    raw_ownership = doc.get("OwnerShip")
+    if isinstance(raw_ownership, list):
+        ownership = as_json(raw_ownership, default_val=[])
+    else:
+        ownership = as_json([], default_val=[])
 
-    section_val = as_json(doc.get("Section") if isinstance(doc.get("Section"), dict) else {}, default_val={})
+    location = clean_str(doc.get("Location"), 255)
+
+    raw_attrs = doc.get("Attributes")
+    if isinstance(raw_attrs, dict):
+        attributes = as_json(raw_attrs, default_val={})
+    elif raw_attrs is None:
+        attributes = as_json({}, default_val={})
+    else:
+        attributes = as_json(raw_attrs, default_val={})
+
     tags = clean_string_list(doc.get("Tags"))
-    status = map_voucher_status(doc.get("Status"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
+    value = clean_decimal(doc.get("Value"), default=Decimal("0.00"))
+    status = map_material_status(doc.get("Status"))
+    last_verified_on = clean_epoch_ms(doc.get("LastVerifiedOn"))
+    pages = clean_int(doc.get("Pages"), default=0)
 
     return (
-        voucher_id,
+        material_view_id,
+        tracking_id,
+        isbn,
+        title,
+        author,
+        publisher,
         owner_id,
-        description,
-        ref_no,
-        voucher_no,
-        voucher_type,
-        date_val,
-        by_val,
-        to_val,
-        by_total,
-        to_total,
-        section_val,
+        ownership,
+        location,
+        attributes,
         tags,
+        value,
         status,
-        created_on,
+        last_verified_on,
+        pages,
     )
 
 
 # -----------------------------------------------------------------------------
-# PostgreSQL Schema Setup (Only primary key, no secondary indexes)
+# PostgreSQL Schema Setup (Only primary key, no secondary indexes, no views)
 # -----------------------------------------------------------------------------
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and voucher_views table without secondary indexes."""
+    """Create target enum and material_views table without secondary indexes or views."""
     cur.execute(
         """
-        -- 1. Create or extend Enums
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'voucher_type_enum') THEN
-                CREATE TYPE voucher_type_enum AS ENUM (
-                    'Expense',
-                    'Income',
-                    'Journal',
-                    'Contra',
-                    'Payment',
-                    'Receipt',
-                    'Unknown'
-                );
-            ELSE
-                BEGIN
-                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Contra';
-                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Payment';
-                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Receipt';
-                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Unknown';
-                EXCEPTION WHEN OTHERS THEN
-                    NULL;
-                END;
-            END IF;
-
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'voucher_status_enum') THEN
-                CREATE TYPE voucher_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'material_status_enum') THEN
+                CREATE TYPE material_status_enum AS ENUM (
                     'Unknown',
                     'Active',
-                    'Disabled'
+                    'Issued',
+                    'UnderMaintenance',
+                    'Disabled',
+                    'Archived'
                 );
-            ELSE
-                BEGIN
-                    ALTER TYPE voucher_status_enum ADD VALUE IF NOT EXISTS 'Unknown';
-                EXCEPTION WHEN OTHERS THEN
-                    NULL;
-                END;
             END IF;
         END $$;
 
-        -- 2. Create Target Table (No secondary indexes)
-        CREATE TABLE IF NOT EXISTS voucher_views (
+        CREATE TABLE IF NOT EXISTS material_views (
             id UUID PRIMARY KEY,
+            tracking_id VARCHAR(100),
+            isbn VARCHAR(100),
+            title TEXT,
+            author VARCHAR(255),
+            publisher VARCHAR(255),
             owner_id UUID,
-            description TEXT,
-            ref_no VARCHAR(100),
-            voucher_no VARCHAR(100),
-            type voucher_type_enum NOT NULL DEFAULT 'Expense',
-            date TIMESTAMPTZ,
-            "by" JSONB DEFAULT '[]'::jsonb,
-            "to" JSONB DEFAULT '[]'::jsonb,
-            by_total NUMERIC(18, 2),
-            to_total NUMERIC(18, 2),
-            section JSONB DEFAULT '{}'::jsonb,
+            ownership JSONB DEFAULT '[]'::jsonb,
+            location VARCHAR(255),
+            attributes JSONB DEFAULT '{}'::jsonb,
             tags TEXT[] DEFAULT '{}'::text[],
-            status voucher_status_enum NOT NULL DEFAULT 'Active',
-            created_on TIMESTAMPTZ NOT NULL
+            value NUMERIC(18, 2) DEFAULT 0.00,
+            status material_status_enum NOT NULL DEFAULT 'Active',
+            last_verified_on BIGINT,
+            pages INTEGER DEFAULT 0
         );
-
-        -- Backward-compatibility view for case-insensitive access
-        CREATE OR REPLACE VIEW voucherviews AS SELECT * FROM voucher_views;
         """
     )
 
@@ -449,32 +425,46 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_voucher_view(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> UpsertResult:
-    """Idempotently upsert a VoucherView document."""
-    fields = extract_voucher_fields(doc)
+def upsert_material_view(
+    cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
+) -> UpsertResult:
+    """Idempotently upsert a MaterialView document."""
+    fields = extract_material_view_fields(doc)
     sql = """
-        INSERT INTO voucher_views (
-            id, owner_id, description, ref_no, voucher_no, type, date,
-            "by", "to", by_total, to_total, section, tags, status, created_on
+        INSERT INTO material_views (
+            id,
+            tracking_id,
+            isbn,
+            title,
+            author,
+            publisher,
+            owner_id,
+            ownership,
+            location,
+            attributes,
+            tags,
+            value,
+            status,
+            last_verified_on,
+            pages
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
+            tracking_id = EXCLUDED.tracking_id,
+            isbn = EXCLUDED.isbn,
+            title = EXCLUDED.title,
+            author = EXCLUDED.author,
+            publisher = EXCLUDED.publisher,
             owner_id = EXCLUDED.owner_id,
-            description = EXCLUDED.description,
-            ref_no = EXCLUDED.ref_no,
-            voucher_no = EXCLUDED.voucher_no,
-            type = EXCLUDED.type,
-            date = EXCLUDED.date,
-            "by" = EXCLUDED."by",
-            "to" = EXCLUDED."to",
-            by_total = EXCLUDED.by_total,
-            to_total = EXCLUDED.to_total,
-            section = EXCLUDED.section,
+            ownership = EXCLUDED.ownership,
+            location = EXCLUDED.location,
+            attributes = EXCLUDED.attributes,
             tags = EXCLUDED.tags,
+            value = EXCLUDED.value,
             status = EXCLUDED.status,
-            created_on = EXCLUDED.created_on
+            last_verified_on = EXCLUDED.last_verified_on,
+            pages = EXCLUDED.pages
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -552,7 +542,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for VoucherViews."""
+    """Run the end-to-end migration for MaterialViews."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -562,26 +552,26 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.vouchers_collection}"
+            f"collection={cfg.material_views_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        voucher_docs = raven_query_collection(
-            requests_session, cfg, cfg.vouchers_collection
+        material_docs = raven_query_collection(
+            requests_session, cfg, cfg.material_views_collection
         )
 
-        # Fallback to singular or alternate name if 0 docs fetched with default name
-        if not voucher_docs and cfg.vouchers_collection == "VoucherViews":
-            for alt_name in ("VoucherView", "Vouchers"):
-                try:
-                    alt_docs = raven_query_collection(requests_session, cfg, alt_name)
-                    if alt_docs:
-                        print(f"Fallback: Loaded {len(alt_docs)} docs from '{alt_name}'.")
-                        voucher_docs = alt_docs
-                        break
-                except Exception:
-                    pass
+        # Fallback to singular name if 0 docs fetched with default collection name
+        if not material_docs and cfg.material_views_collection == "MaterialViews":
+            try:
+                alt_docs = raven_query_collection(
+                    requests_session, cfg, "MaterialView"
+                )
+                if alt_docs:
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'MaterialView'.")
+                    material_docs = alt_docs
+            except Exception:
+                pass
 
-        print(f"Fetched voucher_views={len(voucher_docs)}")
+        print(f"Fetched material_views={len(material_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -600,19 +590,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_vouchers = 0
-        new_vouchers = 0
+        loaded_views = 0
+        new_views = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting voucher views...")
-                for d in voucher_docs:
-                    res = upsert_voucher_view(cur, d)
-                    loaded_vouchers += 1
-                    new_vouchers += int(res.inserted)
+                print("[4/4] Upserting material views...")
+                for d in material_docs:
+                    res = upsert_material_view(cur, d)
+                    loaded_views += 1
+                    new_views += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -621,7 +611,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.vouchers_collection,
+                "collection": cfg.material_views_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -630,14 +620,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "vouchers_processed": loaded_vouchers,
-                "new_vouchers_inserted": new_vouchers,
+                "material_views_processed": loaded_views,
+                "new_material_views_inserted": new_views,
             },
         }
 
         print("Migration completed.")
-        print(f"vouchers_processed: {loaded_vouchers}")
-        print(f"new_vouchers_inserted: {new_vouchers}")
+        print(f"material_views_processed: {loaded_views}")
+        print(f"new_material_views_inserted: {new_views}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

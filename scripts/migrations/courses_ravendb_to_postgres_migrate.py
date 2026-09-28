@@ -1,15 +1,16 @@
+#!/usr/bin/env python3
 """
-Extract Personas data from RavenDB and load it into PostgreSQL.
+Extract Courses data from RavenDB and load it into PostgreSQL.
 
-This script migrates Persona documents and also builds an API-shaped payload
-from PostgreSQL for parity validation. The payload is generated dynamically
-from loaded data (not hardcoded examples).
+The RavenDB Course document contains top-level fields plus nested arrays such as
+Terms and ExamSubjectOrder. This script stores searchable top-level fields as
+columns and keeps nested arrays in JSONB columns on the same course row.
 
 Before running: set all required configuration values in scripts/.env
 (or pass them explicitly as command-line arguments).
 
 Target tables:
-- persona
+- course
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    personas_collection: str
+    courses_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -56,7 +57,7 @@ class Config:
 
 @dataclass
 class UpsertResult:
-    persona_id: str
+    course_id: str
     inserted: bool
 
 
@@ -85,12 +86,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate Personas data from RavenDB to PostgreSQL"
+        description="Migrate Courses data from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -112,7 +118,7 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--personas-collection", default=os.getenv("PERSONAS_COLLECTION", "Personas")
+        "--courses-collection", default=os.getenv("COURSES_COLLECTION", "Courses")
     )
     parser.add_argument("--page-size", type=int, default=os.getenv("PAGE_SIZE"))
     parser.add_argument("--timeout-sec", type=int, default=os.getenv("TIMEOUT_SEC"))
@@ -121,7 +127,7 @@ def parse_args() -> Config:
         default=os.getenv("MIGRATION_SUMMARY_JSON"),
         help=(
             "Optional output path for post-run JSON artifact. "
-            "Default when omitted: validation/personas-migration-summary-<timestamp>.json"
+            "Default when omitted: validation/courses-migration-summary-<timestamp>.json"
         ),
     )
     parser.add_argument(
@@ -137,7 +143,7 @@ def parse_args() -> Config:
     parser.add_argument(
         "--inspect-source-only",
         action="store_true",
-        help="Fetch RavenDB Personas and print source shape/counts without writing PostgreSQL.",
+        help="Fetch RavenDB Courses and print source shape/counts without writing PostgreSQL.",
     )
 
     args = parser.parse_args()
@@ -160,9 +166,9 @@ def parse_args() -> Config:
             parser.error(
                 "Missing PostgreSQL config. Provide --pg-host/--pg-port/--pg-db/--pg-user or set PG_HOST/PG_PORT/PG_DB/PG_USER."
             )
-    if not args.personas_collection:
+    if not args.courses_collection:
         parser.error(
-            "Missing collection config. Provide --personas-collection or set PERSONAS_COLLECTION."
+            "Missing collection config. Provide --courses-collection or set COURSES_COLLECTION."
         )
     if args.page_size is None:
         parser.error("Missing page size. Provide --page-size or set PAGE_SIZE.")
@@ -174,9 +180,15 @@ def parse_args() -> Config:
         parser.error("Invalid timeout. --timeout-sec must be greater than 0.")
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file)
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -195,7 +207,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db or "",
         pg_user=args.pg_user or "",
         pg_password=args.pg_password or "",
-        personas_collection=args.personas_collection,
+        courses_collection=args.courses_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -271,21 +283,91 @@ def parse_ts(value: Any) -> Optional[str]:
         return None
 
 
+def parse_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def edu_level_code(value: Any) -> int:
+    mapping = {
+        "Unknown": -1,
+        "PreNursery": 2,
+        "Nursery": 5,
+        "School": 10,
+        "UnderGraduate": 20,
+        "Graduate": 30,
+        "PostGraduate": 40,
+    }
+    if value in mapping:
+        return mapping[value]
+    try:
+        val_int = int(value)
+        if val_int in mapping.values():
+            return val_int
+    except (TypeError, ValueError):
+        pass
+    return -1
+
+
+def parse_edu_level(value: Any) -> Optional[str]:
+    valid_names = (
+        "Unknown",
+        "PreNursery",
+        "Nursery",
+        "School",
+        "UnderGraduate",
+        "Graduate",
+        "PostGraduate",
+    )
+    if value in valid_names:
+        return str(value)
+    try:
+        return {
+            -1: "Unknown",
+            2: "PreNursery",
+            5: "Nursery",
+            10: "School",
+            20: "UnderGraduate",
+            30: "Graduate",
+            40: "PostGraduate",
+        }.get(int(value), None)
+    except (TypeError, ValueError):
+        return None
+
+
+def course_status_code(value: Any) -> int:
+    mapping = {"Unknown": 0, "Active": 1, "Disabled": 99}
+    if value in mapping:
+        return mapping[value]
+    try:
+        val_int = int(value)
+        if val_int in mapping.values():
+            return val_int
+    except (TypeError, ValueError):
+        pass
+    return 0
+
+
+def parse_course_status(value: Any) -> str:
+    if value in ("Unknown", "Active", "Disabled"):
+        return str(value)
+    try:
+        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(value), "Active")
+    except (TypeError, ValueError):
+        return "Active"
+
+
 def as_text(value: Any) -> Optional[str]:
     if value is None:
         return None
     return str(value)
-
-
-def as_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return int(value)
-    try:
-        return int(str(value).strip())
-    except ValueError:
-        return None
 
 
 def as_json(value: Any) -> Optional[Json]:
@@ -313,87 +395,70 @@ def iso_utc(value: Any) -> Optional[str]:
     return str(value)
 
 
-def as_string_list(value: Any) -> Optional[List[str]]:
+def edu_level_code(value: Any) -> int:
     if value is None:
-        return None
-    if isinstance(value, list):
-        return [str(x) for x in value if x is not None]
-    return [str(value)]
+        return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    parsed = parse_int(text)
+    if parsed is not None:
+        return parsed
 
-
-def persona_type_code(value: Any) -> int:
     mapping = {
-        "Anon": 10,
-        "Management": 20,
-        "Parent": 30,
-        "Staff": 40,
-        "Student": 50,
-        "External": 80,
-        "Dev": 90,
+        "school": 10,
+        "undergraduate": 20,
+        "graduate": 30,
+        "postgraduate": 30,
+        "doctorate": 40,
     }
-    if value in mapping:
-        return mapping[value]
-    try:
-        val_int = int(value)
-        if val_int in mapping.values():
-            return val_int
-    except (TypeError, ValueError):
-        pass
-    return 10
+    return mapping.get(text.lower(), 0)
 
 
-def persona_status_code(value: Any) -> int:
-    mapping = {"Unknown": -1, "Active": 1, "Disabled": 99}
-    if value in mapping:
-        return mapping[value]
-    try:
-        val_int = int(value)
-        if val_int in mapping.values():
-            return val_int
-    except (TypeError, ValueError):
-        pass
-    return -1
+def course_status_code(value: Any) -> int:
+    if value is None:
+        return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    parsed = parse_int(text)
+    if parsed is not None:
+        return parsed
 
-
-def parse_persona_type(value: Any) -> Optional[str]:
-    valid_names = ("Anon", "Management", "Parent", "Staff", "Student", "External", "Dev")
-    if value in valid_names:
-        return str(value)
-    try:
-        return {
-            10: "Anon",
-            20: "Management",
-            30: "Parent",
-            40: "Staff",
-            50: "Student",
-            80: "External",
-            90: "Dev",
-        }.get(int(value), None)
-    except (TypeError, ValueError):
-        return None
-
-
-def parse_persona_status(value: Any) -> str:
-    if value in ("Unknown", "Active", "Disabled"):
-        return str(value)
-    try:
-        return {-1: "Unknown", 1: "Active", 99: "Disabled"}.get(int(value), "Active")
-    except (TypeError, ValueError):
-        return "Active"
+    mapping = {
+        "active": 1,
+        "inactive": 0,
+        "archived": 2,
+        "deleted": 9,
+    }
+    return mapping.get(text.lower(), 0)
 
 
 def to_camel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    status_text = first_non_empty(row.get("status_as_string"), row.get("status"))
+    edu_level_text = first_non_empty(
+        row.get("edu_level_as_string"), row.get("edu_level")
+    )
+
     return {
+        "name": row.get("name"),
+        "branch": row.get("branch"),
+        "nameAndBranch": row.get("name_and_branch"),
+        "eduLevel": edu_level_code(row.get("edu_level")),
+        "eduLevelAsString": edu_level_text,
+        "instId": row.get("inst_id"),
+        "affiliation": row.get("affiliation"),
+        "status": course_status_code(status_text),
+        "statusAsString": status_text,
+        "terms": as_list(row.get("terms")),
+        "examSubjectOrder": as_list(row.get("exam_subject_order")),
+        "sortIndex": row.get("sort_index"),
+        "rank": row.get("rank"),
+        "seatsAvailable": row.get("seats_available"),
+        "program": row.get("program"),
         "id": row.get("id"),
-        "title": row.get("title"),
-        "displayText": row.get("display_text"),
-        "personaType": row.get("persona_type"),
-        "personaTypeAsString": row.get("persona_type_as_string"),
-        "scope": as_list(row.get("scope")),
-        "namedScope": as_list(row.get("named_scope")),
-        "status": row.get("status"),
         "ownerId": row.get("owner_id"),
-        "parentId": row.get("parent_id"),
+        "parentId": row.get("parent_id") or "",
         "createdOn": iso_utc(row.get("created_on")),
         "createdBy": row.get("created_by"),
         "modifiedOn": iso_utc(row.get("modified_on")),
@@ -401,40 +466,47 @@ def to_camel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def build_personas_list_payload(
+def build_courses_list_payload(
     cur: psycopg2.extensions.cursor, params: Dict[str, Any]
 ) -> Dict[str, Any]:
     top = int(params.get("recordsPerPage") or 256)
     current_page = int(params.get("currentPage") or 0)
     offset = current_page * top
 
-    cur.execute("SELECT COUNT(*) FROM persona")
+    cur.execute("SELECT COUNT(*) FROM course")
     total_records = int(cur.fetchone()[0])
 
     cur.execute(
         """
         SELECT
             id::text AS id,
-            title,
-            display_text,
-            persona_type,
-            persona_type_as_string,
-            COALESCE(scope, '{}'::text[]) AS scope,
-            COALESCE(named_scope, '{}'::text[]) AS named_scope,
+            name,
+            branch,
+            name_and_branch,
+            edu_level,
+            edu_level_as_string,
+            inst_id::text AS inst_id,
+            affiliation,
             status,
+            status_as_string,
+            COALESCE(terms, '[]'::jsonb) AS terms,
+            COALESCE(exam_subject_order, ARRAY[]::text[]) AS exam_subject_order,
+            sort_index,
+            rank,
+            seats_available,
+            program,
             owner_id::text AS owner_id,
             parent_id::text AS parent_id,
             created_on,
             created_by::text AS created_by,
             modified_on,
             modified_by::text AS modified_by
-        FROM persona
-        ORDER BY created_on DESC NULLS LAST, title NULLS LAST, id
+        FROM course
+        ORDER BY name NULLS LAST, branch NULLS LAST, id
         LIMIT %s OFFSET %s
         """,
         (top, offset),
     )
-
     columns = [desc[0] for desc in cur.description]
     rows = [dict(zip(columns, row)) for row in cur.fetchall()]
 
@@ -464,12 +536,12 @@ def build_api_payload_validation(
     }
     return {
         "reference": {
-            "note": "PostgreSQL-derived API-shaped payloads for persona read parity validation.",
+            "note": "PostgreSQL-derived API-shaped payloads for course read parity validation.",
         },
         "endpoints": {
-            "personasList": {
+            "coursesList": {
                 "request": list_params,
-                "response": build_personas_list_payload(cur, list_params),
+                "response": build_courses_list_payload(cur, list_params),
             }
         },
     }
@@ -534,33 +606,33 @@ def configure_raven_session(session: requests.Session, cfg: Config) -> None:
         print("Warning: RavenDB TLS verification is disabled (--raven-insecure).")
 
 
-def derive_persona_id(doc: Dict[str, Any]) -> Optional[str]:
+def derive_course_id(doc: Dict[str, Any]) -> Optional[str]:
     return first_non_empty(
         extract_uuid_from_any(get_nested(doc, "@metadata", "@id")),
-        extract_uuid_from_any(doc.get("PersonaId")),
+        extract_uuid_from_any(doc.get("CourseId")),
         extract_uuid_from_any(doc.get("Id")),
     )
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create persona table and indexes with exact target schema."""
+    """Create course table and indexes with exact target schema."""
     cur.execute(
         """
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'persona_type_enum') THEN
-                CREATE TYPE persona_type_enum AS ENUM (
-                    'Anon',
-                    'Management',
-                    'Parent',
-                    'Staff',
-                    'Student',
-                    'External',
-                    'Dev'
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'edu_level_enum') THEN
+                CREATE TYPE edu_level_enum AS ENUM (
+                    'Unknown',
+                    'PreNursery',
+                    'Nursery',
+                    'School',
+                    'UnderGraduate',
+                    'Graduate',
+                    'PostGraduate'
                 );
             END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'persona_status_enum') THEN
-                CREATE TYPE persona_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'course_status_enum') THEN
+                CREATE TYPE course_status_enum AS ENUM (
                     'Unknown',
                     'Active',
                     'Disabled'
@@ -568,15 +640,23 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             END IF;
         END $$;
 
-        CREATE TABLE IF NOT EXISTS persona (
+        CREATE TABLE IF NOT EXISTS course (
             id UUID PRIMARY KEY,
-            title VARCHAR(200),
-            display_text VARCHAR(200),
-            persona_type persona_type_enum,
-            persona_type_as_string VARCHAR(64),
-            scope TEXT[],
-            named_scope TEXT[],
-            status persona_status_enum,
+            name VARCHAR(200),
+            branch VARCHAR(100),
+            name_and_branch VARCHAR(200),
+            edu_level edu_level_enum,
+            edu_level_as_string VARCHAR(32),
+            inst_id UUID,
+            affiliation VARCHAR(100),
+            status course_status_enum,
+            status_as_string VARCHAR(32),
+            terms JSONB,
+            exam_subject_order TEXT[],
+            sort_index INTEGER,
+            rank INTEGER,
+            seats_available INTEGER,
+            program TEXT,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ,
@@ -590,15 +670,23 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 
 def assert_required_schema(cur: psycopg2.extensions.cursor) -> None:
     required_columns: Dict[str, Sequence[str]] = {
-        "persona": (
+        "course": (
             "id",
-            "title",
-            "display_text",
-            "persona_type",
-            "persona_type_as_string",
-            "scope",
-            "named_scope",
+            "name",
+            "branch",
+            "name_and_branch",
+            "edu_level",
+            "edu_level_as_string",
+            "inst_id",
+            "affiliation",
             "status",
+            "status_as_string",
+            "terms",
+            "exam_subject_order",
+            "sort_index",
+            "rank",
+            "seats_available",
+            "program",
             "owner_id",
             "parent_id",
             "created_on",
@@ -608,16 +696,25 @@ def assert_required_schema(cur: psycopg2.extensions.cursor) -> None:
         )
     }
     required_types: Dict[str, Dict[str, Sequence[str]]] = {
-        "persona": {
+        "course": {
             "id": ("uuid",),
-            "title": ("character varying", "text"),
-            "display_text": ("character varying", "text"),
-            "persona_type": ("user-defined", "persona_type_enum"),
-            "persona_type_as_string": ("character varying", "text"),
-            "scope": ("array", "text[]"),
-            "named_scope": ("array", "text[]"),
-            "status": ("user-defined", "persona_status_enum"),
+            "name": ("character varying",),
+            "branch": ("character varying",),
+            "name_and_branch": ("character varying",),
+            "edu_level": ("user-defined", "edu_level_enum"),
+            "edu_level_as_string": ("character varying",),
+            "inst_id": ("uuid",),
+            "affiliation": ("character varying",),
+            "status": ("user-defined", "course_status_enum"),
+            "status_as_string": ("character varying",),
+            "terms": ("jsonb",),
+            "exam_subject_order": ("array", "text[]"),
+            "sort_index": ("integer",),
+            "rank": ("integer",),
+            "seats_available": ("integer",),
+            "program": ("text", "character varying"),
             "owner_id": ("uuid",),
+            "parent_id": ("uuid",),
             "created_on": ("timestamp with time zone",),
             "created_by": ("uuid",),
             "modified_on": ("timestamp with time zone",),
@@ -662,27 +759,35 @@ def assert_required_schema(cur: psycopg2.extensions.cursor) -> None:
             )
 
 
-def upsert_persona(
+def upsert_course(
     cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
 ) -> Optional[UpsertResult]:
-    persona_id = derive_persona_id(doc)
-    if not persona_id:
+    course_id = derive_course_id(doc)
+    if not course_id:
         return None
 
-    cur.execute("SELECT 1 FROM persona WHERE id = %s", (persona_id,))
+    cur.execute("SELECT 1 FROM course WHERE id = %s", (course_id,))
     is_new = cur.fetchone() is None
 
     cur.execute(
         """
-        INSERT INTO persona (
+        INSERT INTO course (
             id,
-            title,
-            display_text,
-            persona_type,
-            persona_type_as_string,
-            scope,
-            named_scope,
+            name,
+            branch,
+            name_and_branch,
+            edu_level,
+            edu_level_as_string,
+            inst_id,
+            affiliation,
             status,
+            status_as_string,
+            terms,
+            exam_subject_order,
+            sort_index,
+            rank,
+            seats_available,
+            program,
             owner_id,
             parent_id,
             created_on,
@@ -691,18 +796,26 @@ def upsert_persona(
             modified_by
         )
         VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id)
         DO UPDATE SET
-            title = EXCLUDED.title,
-            display_text = EXCLUDED.display_text,
-            persona_type = EXCLUDED.persona_type,
-            persona_type_as_string = EXCLUDED.persona_type_as_string,
-            scope = EXCLUDED.scope,
-            named_scope = EXCLUDED.named_scope,
+            name = EXCLUDED.name,
+            branch = EXCLUDED.branch,
+            name_and_branch = EXCLUDED.name_and_branch,
+            edu_level = EXCLUDED.edu_level,
+            edu_level_as_string = EXCLUDED.edu_level_as_string,
+            inst_id = EXCLUDED.inst_id,
+            affiliation = EXCLUDED.affiliation,
             status = EXCLUDED.status,
+            status_as_string = EXCLUDED.status_as_string,
+            terms = EXCLUDED.terms,
+            exam_subject_order = EXCLUDED.exam_subject_order,
+            sort_index = EXCLUDED.sort_index,
+            rank = EXCLUDED.rank,
+            seats_available = EXCLUDED.seats_available,
+            program = EXCLUDED.program,
             owner_id = EXCLUDED.owner_id,
             parent_id = EXCLUDED.parent_id,
             created_on = EXCLUDED.created_on,
@@ -712,18 +825,22 @@ def upsert_persona(
         RETURNING id;
         """,
         (
-            persona_id,
-            as_text(doc.get("Title")),
-            as_text(doc.get("DisplayText")),
-            parse_persona_type(
-                first_non_empty(
-                    doc.get("PersonaTypeAsString"), doc.get("PersonaType")
-                )
-            ),
-            as_text(doc.get("PersonaTypeAsString")),
-            as_string_list(doc.get("Scope")),
-            as_string_list(doc.get("NamedScope")),
-            parse_persona_status(doc.get("Status")),
+            course_id,
+            as_text(doc.get("Name")),
+            as_text(doc.get("Branch")),
+            as_text(doc.get("NameAndBranch")),
+            parse_edu_level(doc.get("EduLevel")),
+            as_text(doc.get("EduLevelAsString")),
+            extract_uuid_from_any(doc.get("InstId")),
+            as_text(doc.get("Affiliation")),
+            parse_course_status(doc.get("Status")),
+            as_text(doc.get("StatusAsString")),
+            as_json(as_list(doc.get("Terms"))),
+            as_list(doc.get("ExamSubjectOrder")),
+            parse_int(doc.get("SortIndex")),
+            parse_int(doc.get("Rank")),
+            parse_int(doc.get("SeatsAvailable")),
+            as_text(doc.get("Program")),
             extract_uuid_from_any(doc.get("OwnerId")),
             extract_uuid_from_any(doc.get("ParentId")),
             parse_ts(doc.get("CreatedOn")),
@@ -741,29 +858,51 @@ def upsert_persona(
 
 def build_source_profile(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
     profile = {
-        "persona_documents": len(docs),
-        "with_persona_id": 0,
-        "scope_items": 0,
-        "named_scope_items": 0,
-        "first_persona": None,
+        "course_documents": len(docs),
+        "with_course_id": 0,
+        "terms_count": 0,
+        "sections_count": 0,
+        "subjects_count": 0,
+        "exam_subject_order_count": 0,
+        "first_course": None,
     }
 
     for doc in docs:
-        if derive_persona_id(doc):
-            profile["with_persona_id"] += 1
-        profile["scope_items"] += len(as_list(doc.get("Scope")))
-        profile["named_scope_items"] += len(as_list(doc.get("NamedScope")))
+        if derive_course_id(doc):
+            profile["with_course_id"] += 1
+
+        terms = doc.get("Terms") if isinstance(doc.get("Terms"), list) else []
+        profile["terms_count"] += len(terms)
+
+        for term in terms:
+            if not isinstance(term, dict):
+                continue
+            sections = term.get("Sections") if isinstance(term.get("Sections"), list) else []
+            profile["sections_count"] += len(sections)
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                subjects = (
+                    section.get("Subjects")
+                    if isinstance(section.get("Subjects"), list)
+                    else []
+                )
+                profile["subjects_count"] += len(subjects)
+
+        if isinstance(doc.get("ExamSubjectOrder"), list):
+            profile["exam_subject_order_count"] += len(doc["ExamSubjectOrder"])
 
     if docs:
         first = docs[0]
-        profile["first_persona"] = {
-            "id": derive_persona_id(first),
-            "title": first.get("Title"),
-            "persona_type": first.get("PersonaType"),
+        first_terms = first.get("Terms") if isinstance(first.get("Terms"), list) else []
+        profile["first_course"] = {
+            "id": derive_course_id(first),
+            "name": first.get("Name"),
+            "branch": first.get("Branch"),
+            "edu_level": first.get("EduLevel"),
             "status": first.get("Status"),
-            "owner_id": first.get("OwnerId"),
-            "scope_items": len(as_list(first.get("Scope"))),
-            "named_scope_items": len(as_list(first.get("NamedScope"))),
+            "terms_count": len(first_terms),
+            "exam_subject_order_count": len(first.get("ExamSubjectOrder") or []),
         }
 
     return profile
@@ -777,16 +916,14 @@ def main() -> int:
     try:
         configure_raven_session(requests_session, cfg)
         print(
-            f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, collection={cfg.personas_collection}"
+            f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, collection={cfg.courses_collection}"
         )
-        print("[1/3] Fetching RavenDB persona documents...")
-        persona_docs = raven_query_collection(
-            requests_session, cfg, cfg.personas_collection
-        )
-        print(f"Fetched personas={len(persona_docs)}")
+        print("[1/3] Fetching RavenDB course documents...")
+        course_docs = raven_query_collection(requests_session, cfg, cfg.courses_collection)
+        print(f"Fetched courses={len(course_docs)}")
 
         if cfg.inspect_source_only:
-            print(json.dumps(build_source_profile(persona_docs), indent=2))
+            print(json.dumps(build_source_profile(course_docs), indent=2))
             return 0
 
         print("[2/3] Connecting PostgreSQL...")
@@ -805,28 +942,28 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        personas_processed = 0
-        personas_inserted = 0
-        skipped_personas_missing_id = 0
+        courses_processed = 0
+        courses_inserted = 0
+        skipped_courses_missing_id = 0
 
         with conn:
             with conn.cursor() as cur:
                 ensure_target_schema(cur)
                 assert_required_schema(cur)
 
-                print("[3/3] Upserting personas...")
-                for doc in persona_docs:
-                    result = upsert_persona(cur, doc)
+                print("[3/3] Upserting courses...")
+                for doc in course_docs:
+                    result = upsert_course(cur, doc)
                     if result is None:
-                        skipped_personas_missing_id += 1
+                        skipped_courses_missing_id += 1
                         continue
-                    personas_processed += 1
-                    personas_inserted += int(result.inserted)
+                    courses_processed += 1
+                    courses_inserted += int(result.inserted)
 
         api_payload_validation: Optional[Dict[str, Any]] = None
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM persona")
-            persona_count = int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM course")
+            course_count = int(cur.fetchone()[0])
             if cfg.include_api_payload_validation:
                 api_payload_validation = build_api_payload_validation(cur)
 
@@ -837,7 +974,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "personas_collection": cfg.personas_collection,
+                "courses_collection": cfg.courses_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -846,26 +983,26 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "personas_processed": personas_processed,
-                "new_personas_inserted": personas_inserted,
-                "skipped_personas_missing_id": skipped_personas_missing_id,
+                "courses_processed": courses_processed,
+                "new_courses_inserted": courses_inserted,
+                "skipped_courses_missing_id": skipped_courses_missing_id,
             },
             "post_load_counts": {
-                "persona": persona_count,
+                "course": course_count,
             },
         }
         if api_payload_validation is not None:
             summary["api_payload_validation"] = api_payload_validation
 
         print("Migration completed.")
-        print(f"personas_processed: {personas_processed}")
-        print(f"new_personas_inserted: {personas_inserted}")
+        print(f"courses_processed: {courses_processed}")
+        print(f"new_courses_inserted: {courses_inserted}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path
             if not output_path:
                 timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                output_path = f"validation/personas-migration-summary-{timestamp}.json"
+                output_path = f"validation/courses-migration-summary-{timestamp}.json"
             written = write_summary_json(output_path, summary)
             print(f"Summary JSON written: {written}")
 

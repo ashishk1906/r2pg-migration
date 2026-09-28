@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract ImageTags data from RavenDB,
-transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONB,
+Extract LedgerAccountViews data from RavenDB,
+transform it to PostgreSQL schema with native PostgreSQL types and ENUMs,
 and load into PostgreSQL.
 
 Target table:
-- image_tags
+- ledger_account_views
 """
 
 from __future__ import annotations
@@ -29,16 +29,35 @@ UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
-UUID_NAMESPACE_IMAGE_TAGS = uuid.UUID("6ba7b816-9dad-11d1-80b4-00c04fd430c8")
+UUID_NAMESPACE_LEDGER_ACCOUNT_VIEWS = uuid.UUID("6ba7b812-9dad-11d1-80b4-00c04fd430c8")
 
-IMAGE_TAG_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
-    1: "Active",
-    99: "Disabled",
-    "unknown": "Unknown",
+LEDGER_STATUS_MAP: Dict[Any, str] = {
     "active": "Active",
     "disabled": "Disabled",
-    "inactive": "Disabled",
+    "archived": "Archived",
+    "unknown": "Unknown",
+    "1": "Active",
+    "99": "Disabled",
+    1: "Active",
+    99: "Disabled",
+}
+
+NATURE_OF_ACCOUNTS_MAP: Dict[str, str] = {
+    "inherit": "Inherit",
+    "assets": "Assets",
+    "asset": "Assets",
+    "liabilities": "Liabilities",
+    "liability": "Liabilities",
+    "income": "Income",
+    "expenses": "Expenses",
+    "expense": "Expenses",
+    "unknown": "Unknown",
+}
+
+LEDGER_TYPE_MAP: Dict[str, str] = {
+    "ledger": "Ledger",
+    "group": "Group",
+    "unknown": "Unknown",
 }
 
 
@@ -59,7 +78,7 @@ class Config:
     pg_db: str
     pg_user: str
     pg_password: str
-    image_tags_collection: str
+    ledger_account_views_collection: str
     page_size: int
     timeout_sec: int
     summary_json_path: Optional[str]
@@ -98,12 +117,17 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def parse_args() -> Config:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_env = os.path.join(script_dir, "..", ".env")
-    if os.path.exists(root_env):
-        load_env_file(root_env)
+    for env_path in (
+        os.path.join(script_dir, "..", "..", ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        os.path.join(script_dir, ".env"),
+    ):
+        if os.path.exists(env_path):
+            load_env_file(env_path)
+            break
 
     parser = argparse.ArgumentParser(
-        description="Migrate ImageTags from RavenDB to PostgreSQL"
+        description="Migrate LedgerAccountViews from RavenDB to PostgreSQL"
     )
     parser.add_argument("--raven-url", default=os.getenv("RAVEN_URL"))
     parser.add_argument("--raven-db", default=os.getenv("RAVEN_DB"))
@@ -124,9 +148,9 @@ def parse_args() -> Config:
     parser.add_argument("--pg-password", default=os.getenv("PG_PASSWORD"))
 
     parser.add_argument(
-        "--image-tags-collection",
-        default=os.getenv("IMAGE_TAGS_COLLECTION", "ImageTags"),
-        help="RavenDB collection name for image tags (default: ImageTags)",
+        "--ledger-account-views-collection",
+        default=os.getenv("LEDGER_ACCOUNT_VIEWS_COLLECTION", "LedgerAccountViews"),
+        help="RavenDB collection name for ledger account views (default: LedgerAccountViews)",
     )
     parser.add_argument(
         "--page-size", type=int, default=int(os.getenv("PAGE_SIZE", "500"))
@@ -169,11 +193,15 @@ def parse_args() -> Config:
 
     if args.raven_cert_file:
         if not os.path.isfile(args.raven_cert_file):
-            script_dir_cert = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), args.raven_cert_file
-            )
-            if os.path.isfile(script_dir_cert):
-                args.raven_cert_file = script_dir_cert
+            for cert_dir in (
+                os.path.join(script_dir, ".."),
+                os.path.join(script_dir, "..", ".."),
+                script_dir,
+            ):
+                cand = os.path.join(cert_dir, args.raven_cert_file)
+                if os.path.isfile(cand):
+                    args.raven_cert_file = cand
+                    break
             else:
                 parser.error(f"Raven cert file not found: {args.raven_cert_file}")
     if args.raven_cert_file and not args.raven_url.lower().startswith("https://"):
@@ -193,7 +221,7 @@ def parse_args() -> Config:
         pg_db=args.pg_db,
         pg_user=args.pg_user,
         pg_password=args.pg_password,
-        image_tags_collection=args.image_tags_collection,
+        ledger_account_views_collection=args.ledger_account_views_collection,
         page_size=args.page_size,
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
@@ -230,63 +258,30 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any, default: bool = False) -> bool:
-    if val is None:
-        return default
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() in {"true", "1", "yes"}
-
-
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
-    """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
-    if value is None:
-        return Json(default_val) if default_val is not None else None
-    return Json(value)
-
-
-def parse_iso_timestamp(val: Any) -> Optional[datetime]:
-    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
-    if not val:
-        return None
-    text = str(val).strip()
-    if not text:
-        return None
-
-    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
-    if "." in normalized:
-        base, frac = normalized.split(".", 1)
-        tz_pos = max(frac.find("+"), frac.find("-"))
-        if tz_pos >= 0:
-            frac_part = frac[:tz_pos]
-            tz_part = frac[tz_pos:]
-        else:
-            frac_part = frac
-            tz_part = ""
-        digits = "".join(ch for ch in frac_part if ch.isdigit())[:6]
-        normalized = f"{base}.{digits}{tz_part}" if digits else f"{base}{tz_part}"
-    if "+" not in normalized[10:] and "-" not in normalized[10:]:
-        normalized = f"{normalized}+00:00"
-
-    try:
-        dt = datetime.fromisoformat(normalized)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-def map_image_tag_status(val: Any) -> str:
-    """Map status string/int to image_tag_status_enum."""
-    if val is None:
+def map_ledger_status(raw_val: Any) -> str:
+    """Map status string/int to ledger_account_status_enum."""
+    if raw_val is None:
         return "Active"
-    if isinstance(val, int):
-        return IMAGE_TAG_STATUS_MAP.get(val, "Active")
-    s = str(val).strip()
-    if s.isdigit():
-        return IMAGE_TAG_STATUS_MAP.get(int(s), "Active")
-    return IMAGE_TAG_STATUS_MAP.get(s.lower(), "Active")
+    if isinstance(raw_val, int):
+        return LEDGER_STATUS_MAP.get(raw_val, "Active")
+    norm = str(raw_val).strip().lower()
+    return LEDGER_STATUS_MAP.get(norm, "Active")
+
+
+def map_nature_of_accounts(raw_val: Any) -> str:
+    """Map nature of accounts string to nature_of_accounts_enum."""
+    if raw_val is None:
+        return "Inherit"
+    norm = str(raw_val).strip().lower()
+    return NATURE_OF_ACCOUNTS_MAP.get(norm, "Inherit")
+
+
+def map_ledger_type(raw_val: Any) -> str:
+    """Map ledger type string to ledger_type_enum."""
+    if raw_val is None:
+        return "Ledger"
+    norm = str(raw_val).strip().lower()
+    return LEDGER_TYPE_MAP.get(norm, "Ledger")
 
 
 # -----------------------------------------------------------------------------
@@ -294,56 +289,39 @@ def map_image_tag_status(val: Any) -> str:
 # -----------------------------------------------------------------------------
 
 
-def extract_image_tag_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for image_tags table."""
+def extract_ledger_account_view_fields(doc: Dict[str, Any]) -> Tuple:
+    """Extract and transform fields for ledger_account_views table."""
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
-    tag_id = None
-    if raw_id:
-        clean_raw = str(raw_id).strip()
-        last_part = clean_raw.rsplit("/", 1)[-1]
-        if UUID_RE.fullmatch(last_part):
-            tag_id = last_part.lower()
-        elif UUID_RE.fullmatch(clean_raw):
-            tag_id = clean_raw.lower()
-        else:
-            tag_id = str(
-                uuid.uuid5(UUID_NAMESPACE_IMAGE_TAGS, clean_raw)
-            ).lower()
-    if not tag_id:
-        raise ValueError(f"ImageTag missing valid ID: {raw_id}")
+    ledger_account_id = clean_uuid(raw_id)
+    if not ledger_account_id and raw_id:
+        ledger_account_id = str(
+            uuid.uuid5(UUID_NAMESPACE_LEDGER_ACCOUNT_VIEWS, str(raw_id).strip())
+        ).lower()
+    if not ledger_account_id:
+        raise ValueError(f"LedgerAccountView missing valid ID: {raw_id}")
 
     name = clean_str(doc.get("Name"), 255)
-    predefined = clean_bool(doc.get("Predefined"), default=False)
-    csn = clean_str(doc.get("CSN"), 50)
-    meta = as_json(
-        doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {},
-        default_val={},
-    )
-    status = map_image_tag_status(doc.get("Status"))
-
+    group_id = clean_uuid(doc.get("GroupId"))
+    group_name = clean_str(doc.get("GroupName"), 255)
     owner_id = clean_uuid(doc.get("OwnerId"))
-    parent_id = clean_uuid(doc.get("ParentId"))
-    created_on = parse_iso_timestamp(
-        doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
-    created_by = clean_uuid(doc.get("CreatedBy"))
-    modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
-    modified_by = clean_uuid(doc.get("ModifiedBy"))
+    owner_name = clean_str(doc.get("OwnerName"), 255)
+    owner_type = clean_str(doc.get("OwnerType"), 50)
+    ledger_type = map_ledger_type(doc.get("LedgerType"))
+    nature_of_accounts = map_nature_of_accounts(doc.get("NatureOfAccounts"))
+    status = map_ledger_status(doc.get("Status"))
 
     return (
-        tag_id,
+        ledger_account_id,
         name,
-        predefined,
-        csn,
-        meta,
-        status,
+        group_id,
+        group_name,
         owner_id,
-        parent_id,
-        created_on,
-        created_by,
-        modified_on,
-        modified_by,
+        owner_name,
+        owner_type,
+        ledger_type,
+        nature_of_accounts,
+        status,
     )
 
 
@@ -353,33 +331,51 @@ def extract_image_tag_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and image_tags table without secondary indexes or views."""
+    """Create target enums and ledger_account_views table without secondary indexes or views."""
     cur.execute(
         """
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'image_tag_status_enum') THEN
-                CREATE TYPE image_tag_status_enum AS ENUM (
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ledger_account_status_enum') THEN
+                CREATE TYPE ledger_account_status_enum AS ENUM (
                     'Unknown',
                     'Active',
-                    'Disabled'
+                    'Disabled',
+                    'Archived'
+                );
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'nature_of_accounts_enum') THEN
+                CREATE TYPE nature_of_accounts_enum AS ENUM (
+                    'Unknown',
+                    'Inherit',
+                    'Assets',
+                    'Liabilities',
+                    'Income',
+                    'Expenses'
+                );
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ledger_type_enum') THEN
+                CREATE TYPE ledger_type_enum AS ENUM (
+                    'Unknown',
+                    'Ledger',
+                    'Group'
                 );
             END IF;
         END $$;
 
-        CREATE TABLE IF NOT EXISTS image_tags (
+        CREATE TABLE IF NOT EXISTS ledger_account_views (
             id UUID PRIMARY KEY,
             name VARCHAR(255),
-            predefined BOOLEAN DEFAULT FALSE,
-            csn VARCHAR(50),
-            meta JSONB DEFAULT '{}'::jsonb,
-            status image_tag_status_enum NOT NULL DEFAULT 'Active',
+            group_id UUID,
+            group_name VARCHAR(255),
             owner_id UUID,
-            parent_id UUID,
-            created_on TIMESTAMPTZ,
-            created_by UUID,
-            modified_on TIMESTAMPTZ,
-            modified_by UUID
+            owner_name VARCHAR(255),
+            owner_type VARCHAR(50),
+            ledger_type ledger_type_enum NOT NULL DEFAULT 'Ledger',
+            nature_of_accounts nature_of_accounts_enum NOT NULL DEFAULT 'Inherit',
+            status ledger_account_status_enum NOT NULL DEFAULT 'Active'
         );
         """
     )
@@ -390,40 +386,36 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 # -----------------------------------------------------------------------------
 
 
-def upsert_image_tag(
+def upsert_ledger_account_view(
     cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
 ) -> UpsertResult:
-    """Idempotently upsert an ImageTag document."""
-    fields = extract_image_tag_fields(doc)
+    """Idempotently upsert a LedgerAccountView document."""
+    fields = extract_ledger_account_view_fields(doc)
     sql = """
-        INSERT INTO image_tags (
+        INSERT INTO ledger_account_views (
             id,
             name,
-            predefined,
-            csn,
-            meta,
-            status,
+            group_id,
+            group_name,
             owner_id,
-            parent_id,
-            created_on,
-            created_by,
-            modified_on,
-            modified_by
+            owner_name,
+            owner_type,
+            ledger_type,
+            nature_of_accounts,
+            status
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
             name = EXCLUDED.name,
-            predefined = EXCLUDED.predefined,
-            csn = EXCLUDED.csn,
-            meta = EXCLUDED.meta,
-            status = EXCLUDED.status,
+            group_id = EXCLUDED.group_id,
+            group_name = EXCLUDED.group_name,
             owner_id = EXCLUDED.owner_id,
-            parent_id = EXCLUDED.parent_id,
-            created_on = EXCLUDED.created_on,
-            created_by = EXCLUDED.created_by,
-            modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by
+            owner_name = EXCLUDED.owner_name,
+            owner_type = EXCLUDED.owner_type,
+            ledger_type = EXCLUDED.ledger_type,
+            nature_of_accounts = EXCLUDED.nature_of_accounts,
+            status = EXCLUDED.status
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -501,7 +493,7 @@ def raven_query_collection(
 
 
 def main() -> int:
-    """Run the end-to-end migration for ImageTags."""
+    """Run the end-to-end migration for LedgerAccountViews."""
     cfg = parse_args()
 
     requests_session = requests.Session()
@@ -511,24 +503,26 @@ def main() -> int:
 
         print(
             f"RavenDB target: url={cfg.raven_url}, db={cfg.raven_db}, "
-            f"collection={cfg.image_tags_collection}"
+            f"collection={cfg.ledger_account_views_collection}"
         )
         print("[1/4] Fetching RavenDB documents...")
-        image_tag_docs = raven_query_collection(
-            requests_session, cfg, cfg.image_tags_collection
+        ledger_docs = raven_query_collection(
+            requests_session, cfg, cfg.ledger_account_views_collection
         )
 
         # Fallback to singular name if 0 docs fetched with default collection name
-        if not image_tag_docs and cfg.image_tags_collection == "ImageTags":
+        if not ledger_docs and cfg.ledger_account_views_collection == "LedgerAccountViews":
             try:
-                alt_docs = raven_query_collection(requests_session, cfg, "ImageTag")
+                alt_docs = raven_query_collection(
+                    requests_session, cfg, "LedgerAccountView"
+                )
                 if alt_docs:
-                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'ImageTag'.")
-                    image_tag_docs = alt_docs
+                    print(f"Fallback: Loaded {len(alt_docs)} docs from 'LedgerAccountView'.")
+                    ledger_docs = alt_docs
             except Exception:
                 pass
 
-        print(f"Fetched image_tags={len(image_tag_docs)}")
+        print(f"Fetched ledger_account_views={len(ledger_docs)}")
 
         print("[2/4] Connecting PostgreSQL...")
         print(
@@ -547,19 +541,19 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        loaded_tags = 0
-        new_tags = 0
+        loaded_views = 0
+        new_views = 0
 
         with conn:
             with conn.cursor() as cur:
                 print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
-                print("[4/4] Upserting image tags...")
-                for d in image_tag_docs:
-                    res = upsert_image_tag(cur, d)
-                    loaded_tags += 1
-                    new_tags += int(res.inserted)
+                print("[4/4] Upserting ledger account views...")
+                for d in ledger_docs:
+                    res = upsert_ledger_account_view(cur, d)
+                    loaded_views += 1
+                    new_views += int(res.inserted)
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -568,7 +562,7 @@ def main() -> int:
             "source": {
                 "raven_url": cfg.raven_url,
                 "raven_db": cfg.raven_db,
-                "collection": cfg.image_tags_collection,
+                "collection": cfg.ledger_account_views_collection,
             },
             "target": {
                 "pg_host": cfg.pg_host,
@@ -577,14 +571,14 @@ def main() -> int:
                 "pg_user": cfg.pg_user,
             },
             "run_stats": {
-                "image_tags_processed": loaded_tags,
-                "new_image_tags_inserted": new_tags,
+                "ledger_account_views_processed": loaded_views,
+                "new_ledger_account_views_inserted": new_views,
             },
         }
 
         print("Migration completed.")
-        print(f"image_tags_processed: {loaded_tags}")
-        print(f"new_image_tags_inserted: {new_tags}")
+        print(f"ledger_account_views_processed: {loaded_views}")
+        print(f"new_ledger_account_views_inserted: {new_views}")
 
         if cfg.write_summary_json:
             output_path = cfg.summary_json_path

@@ -618,29 +618,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             END IF;
         END $$;
 
-        -- Drop legacy child tables and views if they exist from older migrations
-        DROP TABLE IF EXISTS application_form_template_course CASCADE;
-        DROP TABLE IF EXISTS application_form_template_shortlist CASCADE;
-        DROP TABLE IF EXISTS application_form_template CASCADE;
-        DROP TABLE IF EXISTS application CASCADE;
-        DO $$
-        BEGIN
-            IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'application_form_template_courses') THEN
-                DROP VIEW application_form_template_courses CASCADE;
-            END IF;
-            IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'application_form_template_shortlists') THEN
-                DROP VIEW application_form_template_shortlists CASCADE;
-            END IF;
-        END $$;
-
-        -- Remove any legacy secondary indexes
-        DROP INDEX IF EXISTS application_form_templates_owner_id_idx;
-        DROP INDEX IF EXISTS application_form_templates_created_on_idx;
-        DROP INDEX IF EXISTS applications_template_id_idx;
-        DROP INDEX IF EXISTS applications_owner_id_idx;
-        DROP INDEX IF EXISTS applications_created_on_idx;
-        DROP INDEX IF EXISTS applications_status_idx;
-
         -- 2. ApplicationFormTemplates Table (Primary key only, no secondary indexes)
         CREATE TABLE IF NOT EXISTS application_form_templates (
             id UUID PRIMARY KEY,
@@ -649,11 +626,11 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             options JSONB,
             start_date TIMESTAMPTZ,
             end_date TIMESTAMPTZ,
-            status application_form_template_status_enum NOT NULL DEFAULT 'Active',
-            shortlists JSONB NOT NULL DEFAULT '[]'::jsonb,
+            status application_form_template_status_enum,
+            shortlists JSONB,
             owner_id UUID,
             parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
+            created_on TIMESTAMPTZ,
             created_by UUID,
             modified_on TIMESTAMPTZ,
             modified_by UUID
@@ -694,10 +671,10 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             application_number INTEGER,
             shortlisted_in INTEGER,
             doa TIMESTAMPTZ,
-            application_status application_status_enum NOT NULL DEFAULT 'WIP',
+            application_status application_status_enum,
             owner_id UUID,
             parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
+            created_on TIMESTAMPTZ,
             created_by UUID,
             modified_on TIMESTAMPTZ,
             modified_by UUID

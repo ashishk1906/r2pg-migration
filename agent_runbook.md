@@ -57,7 +57,11 @@ Execute all steps in order from the repository root. Everything runs inside Dock
 Verify that Docker, Compose v2, `.env`, and the RavenDB certificate are present.
 
 ```bash
+# Bash (Linux / macOS / Git Bash / WSL):
 bash scripts/verify-prerequisites.sh
+
+# PowerShell (Windows native):
+.\scripts\verify-prerequisites.ps1
 ```
 
 - **Expected result:** Exit code `0` and `[PREFLIGHT PASS] All checks passed`.
@@ -101,7 +105,7 @@ docker compose run --rm rpg-migrator --all
 ```bash
 docker compose exec rpg-postgres psql -U postgres -d rpg -c "\dt"
 ```
-- **Expected result:** Lists the 9 migrated tables (`course`, `exam`, `fee`, `fee_transaction`, `institute`, `organization`, `persona`, `staff`, `student`).
+- **Expected result:** Lists all 42 migrated tables.
 
 ---
 

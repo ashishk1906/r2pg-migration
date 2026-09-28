@@ -76,7 +76,11 @@ The agent will autonomously execute all steps in [agent_runbook.md](file:///c:/U
 
 To manually verify all prerequisites before launching the agent:
 ```bash
+# Bash (Linux / macOS / Git Bash / WSL):
 bash scripts/verify-prerequisites.sh
+
+# PowerShell (Windows native):
+.\scripts\verify-prerequisites.ps1
 ```
 If it outputs `[PREFLIGHT PASS]`, the environment is ready.
 

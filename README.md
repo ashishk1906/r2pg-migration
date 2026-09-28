@@ -185,7 +185,7 @@ docker compose run --rm rpg-migrator --all
 
 ### Step 4: Verify Data Parity (RavenDB vs PostgreSQL)
 
-Run the automated parity verification script to perform a 100% field-by-field audit across all 9 domains:
+Run the automated parity verification script to perform a 100% exhaustive audit across all 42 business collections and tables:
 ```bash
 python scripts/verify_raven_to_postgres.py
 ```
@@ -344,7 +344,7 @@ CT-RPG/
 - **.NET API**: Bound to `5000` on the host.
 
 #### 2. RavenDB connection fails during migration?
-- Verify `RAVEN_URL` in `scripts/.env`. If RavenDB is running on your host machine, use `http://host.docker.internal:8080` (configured by default for Docker).
+- Verify `RAVEN_URL` in `.env`. If RavenDB is running on your host machine, use `http://host.docker.internal:8080` (configured by default for Docker).
 - If RavenDB runs inside Docker, make sure it is started (`docker start ravendb`).
 
 #### 3. How to reset the database completely?

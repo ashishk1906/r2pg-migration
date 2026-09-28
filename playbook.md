@@ -124,7 +124,7 @@ Inspect the PostgreSQL schema directly inside the container:
 ```cmd
 docker compose exec rpg-postgres psql -U postgres -d rpg -c "\dt"
 ```
-> **Expected Output:** Shows all 9 migrated tables (`student`, `fee`, `fee_transaction`, `course`, `institute`, `organization`, `persona`, `staff`, `exam`).
+> **Expected Output:** Shows all 42 migrated tables.
 
 ---
 

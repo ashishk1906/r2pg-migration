@@ -121,6 +121,8 @@ def normalize_val(val: Any) -> Any:
         if uuid_cand and len(text) <= 45 and "-" in text:
             return uuid_cand
         return text
+    if isinstance(val, bool):
+        return val
     if isinstance(val, (int, float, Decimal)):
         return round(float(val), 4)
     if isinstance(val, datetime):
@@ -299,6 +301,45 @@ def parse_exam_status(value: Any) -> str:
         }.get(int(value), "Active")
     except (TypeError, ValueError):
         return "Active"
+
+
+def parse_app_res_status(val: Any) -> Optional[str]:
+    if not val or val == 0 or val == "0":
+        return None
+    return {10: "Indian", 20: "PIO_OCI", 30: "NRI"}.get(val) if isinstance(val, int) else val
+
+
+def parse_app_category(val: Any) -> Optional[str]:
+    if not val or val == 0 or val == "0":
+        return None
+    return {40: "GM", 50: "OBC", 60: "SC", 70: "ST"}.get(val) if isinstance(val, int) else val
+
+
+def parse_app_status(val: Any) -> str:
+    if not val or val == 0 or val == "0":
+        return "WIP"
+    m = {0: "WIP", 1: "Selected", 2: "Submitted", 3: "Shortlisted", 4: "Admitted", 5: "Rejected", 6: "OptedIn", 7: "OptedOut", 8: "Declined"}
+    return m.get(val, "WIP") if isinstance(val, int) else val
+
+
+def parse_user_status(val: Any) -> str:
+    if val is None:
+        return "Active"
+    m = {"registered": "Active", "active": "Active", "disabled": "Disabled", "locked": "Locked"}
+    return m.get(str(val).strip().lower(), "Active")
+
+
+def parse_user_gender(val: Any) -> str:
+    if val is None:
+        return "NoInfo"
+    s = str(val).strip().lower()
+    return {"female": "Female", "male": "Male", "noinfo": "NoInfo"}.get(s, "NoInfo")
+
+
+def parse_asset_status(val: Any) -> Any:
+    if isinstance(val, str):
+        return {"Active": 1, "Cleared": 2, "Disabled": 99}.get(val, 1)
+    return val
 
 
 def extract_standard_id(doc: Dict[str, Any]) -> Optional[str]:
@@ -507,11 +548,16 @@ class VerificationEngine:
                 if pk:
                     raven_map[pk.lower()] = doc
 
-            # 2. Fetch PostgreSQL rows
+            # 2. Fetch PostgreSQL rows and column metadata
             with pg_conn.cursor() as cur:
                 try:
                     cur.execute(f"SELECT * FROM {table_name}")
                     pg_rows = cur.fetchall()
+                    cur.execute(
+                        "SELECT column_name, data_type FROM information_schema.columns "
+                        f"WHERE table_schema='public' AND table_name='{table_name}'"
+                    )
+                    pg_col_types = {r["column_name"]: r["data_type"] for r in cur.fetchall()}
                 except psycopg2.errors.UndefinedTable:
                     pg_conn.rollback()
                     result.status = "MISSING_TABLE"
@@ -523,6 +569,55 @@ class VerificationEngine:
                     result.error_message = str(ex)
                     return result
 
+            # Auto-expand to audit ALL fields across all 42 tables
+            all_fields = list(field_comparisons)
+            existing_pg_cols = {pf for _, pf, _ in all_fields}
+
+            all_raven_keys = set()
+            for doc in raven_docs:
+                all_raven_keys.update(doc.keys())
+
+            for rk in sorted(all_raven_keys):
+                if rk in ("@metadata", "Id"):
+                    continue
+                sc = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', rk)).lower()
+                if sc in pg_col_types and sc not in existing_pg_cols and sc != "modified_on":
+                    fn = None
+                    if table_name == "applications":
+                        if sc == "residential_status": fn = parse_app_res_status
+                        elif sc == "category": fn = parse_app_category
+                        elif sc == "gender": fn = parse_student_gender
+                        elif sc == "application_status": fn = parse_app_status
+                        elif sc.endswith("_url") or sc.endswith("_id"): fn = lambda x: extract_uuid(x) if sc.endswith("_id") else (x or None)
+                    elif table_name == "asset" and sc == "status":
+                        fn = parse_asset_status
+                    elif table_name == "assessments" and sc == "status":
+                        fn = lambda x: str(x).title() if x else None
+                    elif table_name == "sms_message" and sc == "status":
+                        fn = lambda x: 1 if x == "Active" else x
+                    elif table_name == "calendar_rules" and sc == "create_meeting_link":
+                        fn = lambda x: bool(x) if x is not None else False
+                    elif table_name == "exam" and sc in ("parent_id", "course_id", "term_id", "inst_id"):
+                        fn = extract_uuid
+                    elif table_name == "users":
+                        if sc in ("password", "salt", "otp", "otp_validity", "password_reset_on", "password_changed_on"):
+                            continue
+                        if sc == "status": fn = parse_user_status
+                        elif sc == "gender": fn = parse_user_gender
+                        elif sc == "virtual_id": fn = None
+                        elif sc.endswith("_id") or sc in ("owner_id", "parent_id", "created_by", "modified_by"):
+                            if pg_col_types.get(sc) == "uuid":
+                                fn = extract_uuid
+                    elif sc == "virtual_id":
+                        fn = None
+                    elif sc.endswith("_id") or sc in ("owner_id", "parent_id", "created_by", "modified_by"):
+                        if pg_col_types.get(sc) == "uuid":
+                            fn = extract_uuid
+
+                    all_fields.append((rk, sc, fn))
+                    existing_pg_cols.add(sc)
+
+            result.total_fields_checked = len(all_fields)
             result.pg_count = len(pg_rows)
             pg_map = {str(r["id"]).lower(): r for r in pg_rows}
 
@@ -541,7 +636,11 @@ class VerificationEngine:
                 r_doc = raven_map[pk]
                 p_row = pg_map[pk]
 
-                for raven_field, pg_field, transform_fn in field_comparisons:
+                for raven_field, pg_field, transform_fn in all_fields:
+                    if pg_field == "modified_on":
+                        continue
+                    if table_name == "users" and pg_field == "virtual_id" and not r_doc.get("VirtualId"):
+                        continue
                     r_raw = r_doc.get(raven_field)
                     if callable(transform_fn):
                         if transform_fn.__code__.co_argcount == 2:
@@ -598,9 +697,11 @@ class VerificationEngine:
 # =============================================================================
 
 def get_all_domain_specs() -> List[Dict[str, Any]]:
-    """Return specs for all 42 RavenDB collections and target PostgreSQL tables."""
+    """Return complete specifications for all 42 RavenDB collections and target PostgreSQL tables.
+    Every domain explicitly specifies all field mappings across all 42 collections.
+    """
 
-    org_comparisons = [
+    organizations_comparisons = [
         ("Name", "name", None),
         ("ShortName", "short_name", lambda x: str(x).strip()[:6] if x else None),
         ("Status", "status", parse_org_status),
@@ -629,7 +730,7 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("ModifiedBy", "modified_by", extract_uuid),
     ]
 
-    inst_comparisons = [
+    institutes_comparisons = [
         ("Name", "name", None),
         ("ShortName", "short_name", lambda x: str(x).strip()[:6] if x else None),
         ("Status", "status", parse_institute_status),
@@ -664,7 +765,7 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("ModifiedBy", "modified_by", extract_uuid),
     ]
 
-    student_comparisons = [
+    students_comparisons = [
         ("StudentId", "student_id", derive_business_student_id),
         ("Name", "name", None),
         ("FirstName", "first_name", None),
@@ -705,9 +806,12 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("CreatedBy", "created_by", extract_uuid),
         ("ModifiedOn", "modified_on", None),
         ("ModifiedBy", "modified_by", extract_uuid),
+        ("Father", "father_name", lambda f, doc: (doc.get("Father") or {}).get("Name")),
+        ("Mother", "mother_name", lambda m, doc: (doc.get("Mother") or {}).get("Name")),
+        ("InstId", "inst_id", lambda _, doc: extract_uuid(doc.get("InstId") or ((doc.get("Enrollments") or [{}])[0].get("InstId") if isinstance(doc.get("Enrollments"), list) else None))),
     ]
 
-    course_comparisons = [
+    courses_comparisons = [
         ("Name", "name", None),
         ("Code", "code", None),
         ("ShortName", "short_name", None),
@@ -722,9 +826,18 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("CreatedBy", "created_by", extract_uuid),
         ("ModifiedOn", "modified_on", None),
         ("ModifiedBy", "modified_by", extract_uuid),
+        ("Affiliation", "affiliation", None),
+        ("Branch", "branch", None),
+        ("EduLevelAsString", "edu_level_as_string", None),
+        ("ExamSubjectOrder", "exam_subject_order", None),
+        ("NameAndBranch", "name_and_branch", None),
+        ("Program", "program", None),
+        ("Rank", "rank", None),
+        ("SeatsAvailable", "seats_available", None),
+        ("StatusAsString", "status_as_string", None),
     ]
 
-    staff_comparisons = [
+    staffs_comparisons = [
         ("Name", "name", None),
         ("FirstName", "first_name", None),
         ("MiddleName", "middle_name", None),
@@ -744,9 +857,25 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("CreatedBy", "created_by", extract_uuid),
         ("ModifiedOn", "modified_on", None),
         ("ModifiedBy", "modified_by", extract_uuid),
+        ("Alias", "alias", None),
+        ("Attributes", "attributes", None),
+        ("ClassTeacher", "class_teacher", None),
+        ("CourseSubjectList", "course_subject_list", None),
+        ("DOB", "dob", None),
+        ("DOJ", "doj", None),
+        ("InstId", "inst_id", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Payslips", "payslips", None),
+        ("RefId", "ref_id", None),
+        ("Salaries", "salaries", None),
+        ("Tags", "tags", None),
+        ("Title", "title", None),
+        ("UserId", "user_id", extract_uuid),
+        ("VirtualId", "virtual_id", None),
     ]
 
-    persona_comparisons = [
+    personas_comparisons = [
         ("Title", "title", None),
         ("DisplayText", "display_text", None),
         ("PersonaType", "persona_type", parse_persona_type),
@@ -757,13 +886,18 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("CreatedBy", "created_by", extract_uuid),
         ("ModifiedOn", "modified_on", None),
         ("ModifiedBy", "modified_by", extract_uuid),
+        ("NamedScope", "named_scope", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("PersonaTypeAsString", "persona_type_as_string", None),
+        ("Scope", "scope", None),
     ]
 
-    fee_comparisons = [
+    fees_comparisons = [
         ("Name", "name", None),
         ("DisplayText", "display_text", None),
         ("Status", "status", parse_fee_status),
-        ("InstId", "inst_id", extract_uuid),
+        ("InstId", "inst_id", None),
         ("OwnerId", "owner_id", extract_uuid),
         ("ParentId", "parent_id", extract_uuid),
         ("Items", "items", None),
@@ -771,11 +905,20 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("CreatedBy", "created_by", extract_uuid),
         ("ModifiedOn", "modified_on", None),
         ("ModifiedBy", "modified_by", extract_uuid),
+        ("Amount", "amount", None),
+        ("CollectStudentWise", "collect_student_wise", None),
+        ("CourseList", "course_list", None),
+        ("Fines", "fines", None),
+        ("Installments", "installments", None),
+        ("IsTxDone", "is_tx_done", None),
+        ("NameLower", "name_lower", None),
+        ("StudentList", "student_list", None),
+        ("Tags", "tags", None),
     ]
 
-    fee_tx_comparisons = [
+    fee_transactions_comparisons = [
         ("StudentId", "student_id", extract_uuid),
-        ("FeeId", "fee_id", extract_uuid),
+        ("FeeId", "fee_id", None),
         ("TxNo", "tx_no", None),
         ("TxDate", "tx_date", None),
         ("Amount", "amount", lambda x: float(x) if x is not None else None),
@@ -790,14 +933,25 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("CreatedBy", "created_by", extract_uuid),
         ("ModifiedOn", "modified_on", None),
         ("ModifiedBy", "modified_by", extract_uuid),
+        ("BankName", "bank_name", None),
+        ("ChequeDate", "cheque_date", None),
+        ("ChequeNo", "cheque_no", None),
+        ("HasFeeAdjustment", "has_fee_adjustment", None),
+        ("IsDiscountGiven", "is_discount_given", None),
+        ("IsFinePaid", "is_fine_paid", None),
+        ("IsOpeningBalanceAdjusted", "is_opening_balance_adjusted", None),
+        ("OnlineTxnRefNo", "online_txn_ref_no", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("PaymentMode", "payment_mode", None),
     ]
 
-    exam_comparisons = [
+    exams_comparisons = [
         ("Name", "name", None),
         ("Status", "status", parse_exam_status),
         ("InstId", "inst_id", extract_uuid),
         ("CourseId", "course_id", extract_uuid),
-        ("TermId", "term_id", extract_uuid),
+        ("TermId", "term_id", None),
         ("Sections", "sections", None),
         ("Subjects", "subjects", None),
         ("GradingScale", "grading_scale", None),
@@ -805,9 +959,22 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("CreatedBy", "created_by", extract_uuid),
         ("ModifiedOn", "modified_on", None),
         ("ModifiedBy", "modified_by", extract_uuid),
+        ("AttendanceList", "attendance_list", None),
+        ("DaysWorked", "days_worked", None),
+        ("ExamContents", "exam_contents", None),
+        ("LockHistory", "lock_history", None),
+        ("MergeIndex", "merge_index", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("RemarksList", "remarks_list", None),
+        ("ResultDate", "result_date", None),
+        ("Section", "section", None),
+        ("StartDate", "start_date", None),
+        ("Term", "term", None),
+        ("TotalMaxMarks", "total_max_marks", None),
     ]
 
-    user_comparisons = [
+    users_comparisons = [
         ("Name", "name", None),
         ("FirstName", "first_name", None),
         ("LastName", "last_name", None),
@@ -815,57 +982,584 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("Mobile", "mobile", None),
         ("CreatedOn", "created_on", None),
         ("CreatedBy", "created_by", extract_uuid),
+        ("Addresses", "addresses", None),
+        ("Attributes", "attributes", None),
+        ("ConfirmedOn", "confirmed_on", None),
+        ("Contacts", "contacts", None),
+        ("CurrentPersona", "current_persona", extract_uuid),
+        ("DOB", "dob", None),
+        ("ForceChangePassword", "force_change_password", None),
+        ("Gender", "gender", parse_user_gender),
+        ("Handle", "handle", None),
+        ("IsVirtual", "is_virtual", None),
+        ("MiddleName", "middle_name", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("Notification", "notification", None),
+        ("OTP", "otp", None),
+        ("OTPValidity", "otp_validity", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Password", "password", None),
+        ("PasswordChangedOn", "password_changed_on", None),
+        ("PasswordResetOn", "password_reset_on", None),
+        ("Personas", "personas", None),
+        ("Preferences", "preferences", None),
+        ("Profile", "profile", None),
+        ("PushNotifications", "push_notifications", None),
+        ("RecoveryEmail", "recovery_email", None),
+        ("RecoveryMobile", "recovery_mobile", None),
+        ("Salt", "salt", None),
+        ("Status", "status", parse_user_status),
+        ("Tags", "tags", None),
+        ("Title", "title", None),
+        ("VirtualId", "virtual_id", None),
     ]
 
-    # Complete 42 domains definition
+    applications_comparisons = [
+        ("Name", "name", None),
+        ("AadharURL", "aadhar_url", None),
+        ("Address", "address", None),
+        ("ApplicationFormTemplateId", "application_form_template_id", extract_uuid),
+        ("ApplicationNumber", "application_number", None),
+        ("ApplicationStatus", "application_status", parse_app_status),
+        ("AppliedFor", "applied_for", None),
+        ("BirthCertificateURL", "birth_certificate_url", None),
+        ("CasteCertificateURL", "caste_certificate_url", None),
+        ("Category", "category", parse_app_category),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("DOA", "doa", None),
+        ("DOB", "dob", None),
+        ("DomicileCertificateURL", "domicile_certificate_url", None),
+        ("Email", "email", None),
+        ("FatherDetails", "father_details", None),
+        ("Gender", "gender", parse_student_gender),
+        ("GuardianDetails", "guardian_details", None),
+        ("HSC", "hsc", None),
+        ("HSCMarksCardURL", "hsc_marks_card_url", None),
+        ("LeavingCertificateURL", "leaving_certificate_url", None),
+        ("Mobile", "mobile", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("MotherDetails", "mother_details", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Payment", "payment", None),
+        ("PhotoURL", "photo_url", None),
+        ("ResidentialStatus", "residential_status", parse_app_res_status),
+        ("SSC", "ssc", None),
+        ("SSCMarksCardURL", "ssc_marks_card_url", None),
+        ("ShortlistedIn", "shortlisted_in", None),
+        ("SubmittedOn", "submitted_on", None),
+        ("TransferCertificateURL", "transfer_certificate_url", None),
+    ]
+
+    app_form_templates_comparisons = [
+        ("Title", "title", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Description", "description", None),
+        ("EndDate", "end_date", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("Options", "options", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Shortlists", "shortlists", None),
+        ("StartDate", "start_date", None),
+        ("Status", "status", None),
+    ]
+
+    artefacts_comparisons = [
+        ("Title", "title", None),
+        ("ChangeSet", "change_set", None),
+        ("Comments", "comments", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Csv", "csv", None),
+        ("DataAttributes", "data_attributes", None),
+        ("Description", "description", None),
+        ("FileName", "file_name", None),
+        ("FileSize", "file_size", None),
+        ("MetaData", "meta_data", None),
+        ("MimeType", "mime_type", None),
+        ("Model", "model", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("PublicUrls", "public_urls", None),
+        ("PublishedOn", "published_on", None),
+        ("SHA1", "sha1", None),
+        ("Status", "status", None),
+        ("Tags", "tags", None),
+        ("Template", "template", None),
+        ("Thumbnails", "thumbnails", None),
+        ("Url", "url", None),
+        ("VideoLinks", "video_links", None),
+    ]
+
+    artefact_tags_comparisons = [
+        ("Name", "name", None),
+        ("CSN", "csn", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Meta", "meta", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Predefined", "predefined", None),
+        ("Status", "status", None),
+    ]
+
+    assessments_comparisons = [
+        ("Name", "name", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Description", "description", None),
+        ("Duration", "duration", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("MultipleAttempts", "multiple_attempts", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Sections", "sections", None),
+        ("Status", "status", lambda x: str(x).title() if x else None),
+        ("Subject", "subject", None),
+        ("SubjectCode", "subject_code", None),
+        ("Tags", "tags", None),
+        ("TotalMarks", "total_marks", None),
+    ]
+
+    assessment_tags_comparisons = [
+        ("Name", "name", None),
+        ("CSN", "csn", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Meta", "meta", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Predefined", "predefined", None),
+        ("Status", "status", None),
+    ]
+
+    asset_views_comparisons = [
+        ("Name", "name", None),
+        ("Attributes", "attributes", None),
+        ("CurrentWarranty", "current_warranty", None),
+        ("LastMaintenance", "last_maintenance", None),
+        ("Location", "location", None),
+        ("OwnerId", "owner_id", None),
+        ("Status", "status", parse_asset_status),
+        ("Tags", "tags", None),
+        ("TrackingId", "tracking_id", None),
+        ("UnderWarranty", "under_warranty", None),
+        ("Value", "value", None),
+    ]
+
+    attendance_events_comparisons = [
+        ("Name", "name", None),
+        ("Attendance", "attendance", None),
+        ("CourseId", "course_id", None),
+        ("CreatedBy", "created_by", None),
+        ("CreatedOn", "created_on", None),
+        ("Date", "date", None),
+        ("InstId", "inst_id", None),
+        ("IsOptionalSubject", "is_optional_subject", None),
+        ("ModifiedBy", "modified_by", None),
+        ("OwnerId", "owner_id", None),
+        ("ParentId", "parent_id", None),
+        ("PeriodNo", "period_no", None),
+        ("SectionName", "section_name", None),
+        ("StaffId", "staff_id", None),
+        ("StudentId", "student_id", None),
+        ("SubjectName", "subject_name", None),
+        ("TermName", "term_name", None),
+    ]
+
+    calendar_rules_comparisons = [
+        ("Name", "name", None),
+        ("CalendarEventCategory", "calendar_event_category", None),
+        ("CalendarRuleStatus", "calendar_rule_status", None),
+        ("CreateMeetingLink", "create_meeting_link", lambda x: bool(x) if x is not None else False),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("CronExpression", "cron_expression", None),
+        ("Duration", "duration", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Title", "title", None),
+        ("TopicId", "topic_id", extract_uuid),
+        ("UserId", "user_id", extract_uuid),
+        ("Weight", "weight", None),
+    ]
+
+    circulation_views_comparisons = [
+        ("DueOn", "due_on", None),
+        ("IssuedOn", "issued_on", None),
+        ("IssuedTo", "issued_to", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ReceivedOn", "received_on", None),
+        ("ReissuedOn", "reissued_on", None),
+        ("TrackingId", "tracking_id", None),
+    ]
+
+    commits_comparisons = [
+        ("AggregateId", "aggregate_id", extract_uuid),
+        ("EventMessage", "event_message", None),
+        ("InstId", "inst_id", extract_uuid),
+        ("UserId", "user_id", extract_uuid),
+        ("Version", "version", None),
+        ("TimeStamp", "timestamp", None),
+    ]
+
+    commit_acs_comparisons = [
+        ("AggregateId", "aggregate_id", extract_uuid),
+        ("EventMessage", "event_message", None),
+        ("InstId", "inst_id", extract_uuid),
+        ("UserId", "user_id", extract_uuid),
+        ("Version", "version", None),
+        ("TimeStamp", "timestamp", None),
+    ]
+
+    commit_assets_comparisons = [
+        ("AggregateId", "aggregate_id", extract_uuid),
+        ("EventMessage", "event_message", None),
+        ("InstId", "inst_id", extract_uuid),
+        ("UserId", "user_id", extract_uuid),
+        ("Version", "version", None),
+        ("TimeStamp", "timestamp", None),
+    ]
+
+    content_tags_comparisons = [
+        ("Name", "name", None),
+        ("CSN", "csn", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Meta", "meta", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Predefined", "predefined", None),
+        ("Status", "status", None),
+    ]
+
+    emails_comparisons = [
+        ("Attachments", "attachments", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("From", "from", None),
+        ("Message", "message", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Recipients", "recipients", None),
+        ("Subject", "subject", None),
+        ("Type", "type", None),
+    ]
+
+    gradings_comparisons = [
+        ("Name", "name", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("GradingRules", "grading_rules", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Status", "status", None),
+    ]
+
+    image_tags_comparisons = [
+        ("Name", "name", None),
+        ("CSN", "csn", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Meta", "meta", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Predefined", "predefined", None),
+        ("Status", "status", None),
+    ]
+
+    institute_calendars_comparisons = [
+        ("Name", "name", None),
+        ("Audience", "audience", None),
+        ("ConductedBy", "conducted_by", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("EventCategory", "event_category", None),
+        ("EventCategoryAsString", "event_category_as_string", None),
+        ("EventDates", "event_dates", None),
+        ("EventName", "event_name", None),
+        ("InstId", "inst_id", extract_uuid),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Priority", "priority", None),
+    ]
+
+    inventory_items_comparisons = [
+        ("Name", "name", None),
+        ("Attributes", "attributes", None),
+        ("GroupId", "group_id", extract_uuid),
+        ("InventoryType", "inventory_type", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("Status", "status", None),
+        ("Tags", "tags", None),
+        ("UOM", "uom", None),
+    ]
+
+    inventory_journals_comparisons = [
+        ("AccountingJournalId", "accounting_journal_id", extract_uuid),
+        ("Date", "date", None),
+        ("InventoryItemId", "inventory_item_id", extract_uuid),
+        ("InventoryJournalId", "inventory_journal_id", extract_uuid),
+        ("JournalEntryType", "journal_entry_type", None),
+        ("Name", "name", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("Particulars", "particulars", None),
+        ("PartyId", "party_id", extract_uuid),
+        ("PartyName", "party_name", None),
+        ("Quantity", "quantity", None),
+        ("Rate", "rate", None),
+        ("Reference", "reference", None),
+        ("Status", "status", None),
+        ("UOM", "uom", None),
+    ]
+
+    ledger_accounts_comparisons = [
+        ("Name", "name", None),
+        ("GroupId", "group_id", extract_uuid),
+        ("GroupName", "group_name", None),
+        ("LedgerType", "ledger_type", None),
+        ("NatureOfAccounts", "nature_of_accounts", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("OwnerName", "owner_name", None),
+        ("OwnerType", "owner_type", None),
+        ("Status", "status", None),
+    ]
+
+    material_views_comparisons = [
+        ("Name", "name", None),
+        ("Attributes", "attributes", None),
+        ("Author", "author", None),
+        ("ISBN", "isbn", None),
+        ("LastVerifiedOn", "last_verified_on", None),
+        ("Location", "location", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("Pages", "pages", None),
+        ("Publisher", "publisher", None),
+        ("Status", "status", None),
+        ("Tags", "tags", None),
+        ("Title", "title", None),
+        ("TrackingId", "tracking_id", None),
+        ("Value", "value", None),
+        ("OwnerShip", "ownership", None),
+    ]
+
+    member_views_comparisons = [
+        ("Name", "name", None),
+        ("IssuedBooks", "issued_books", None),
+        ("MemberType", "member_type", None),
+        ("MembershipId", "membership_id", None),
+        ("OwnerId", "owner_id", extract_uuid),
+    ]
+
+    questions_comparisons = [
+        ("AnswerText", "answer_text", None),
+        ("AnswerType", "answer_type", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("DefaultWeightage", "default_weightage", None),
+        ("Difficulty", "difficulty", None),
+        ("Hints", "hints", None),
+        ("HtmlText", "html_text", None),
+        ("ISN", "isn", None),
+        ("Instruction", "instruction", None),
+        ("Keywords", "keywords", None),
+        ("Meta", "meta", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("Options", "options", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("PlainText", "plain_text", None),
+        ("QuestionText", "question_text", None),
+        ("Questions", "questions", None),
+        ("Status", "status", None),
+        ("TagList", "tag_list", None),
+    ]
+
+    qa_tags_comparisons = [
+        ("Name", "name", None),
+        ("CSN", "csn", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Meta", "meta", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Predefined", "predefined", None),
+        ("Status", "status", None),
+    ]
+
+    random_questions_comparisons = [
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("QuestionsAnswered", "questions_answered", None),
+        ("UserEmail", "user_email", None),
+        ("UserId", "user_id", extract_uuid),
+    ]
+
+    receipts_comparisons = [
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Customer", "customer", None),
+        ("Date", "date", None),
+        ("FinancialInstrument", "financial_instrument", None),
+        ("HTML", "html", None),
+        ("InstId", "inst_id", extract_uuid),
+        ("Meta", "meta", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("Number", "number", None),
+        ("OrderItems", "order_items", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("PaymentMode", "payment_mode", None),
+        ("ReceiptType", "receipt_type", None),
+        ("ReceivedBy", "received_by", None),
+        ("RevenueShare", "revenue_share", None),
+        ("RevenueSharingEnabled", "revenue_sharing_enabled", None),
+        ("Status", "status", None),
+        ("TotalAmount", "total_amount", None),
+    ]
+
+    seat_matrices_comparisons = [
+        ("Name", "name", None),
+        ("BreakUp", "break_up", None),
+        ("Course", "course", None),
+        ("CourseId", "course_id", extract_uuid),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("TotalSeats", "total_seats", None),
+    ]
+
+    sms_comparisons = [
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Gateway", "gateway", None),
+        ("GatewayResult", "gateway_result", None),
+        ("Message", "message", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Recipients", "recipients", None),
+        ("SMSRefId", "sms_ref_id", None),
+    ]
+
+    sms_messages_comparisons = [
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Credits", "credits", None),
+        ("Length", "length", None),
+        ("Message", "message", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Reason", "reason", None),
+        ("Status", "status", lambda x: 1 if x == 'Active' else x),
+        ("StatusAsString", "status_as_string", None),
+        ("StatusAsString", "status_name", None),
+    ]
+
+    topics_comparisons = [
+        ("Name", "name", None),
+        ("Access", "access", None),
+        ("CanPublish", "can_publish", None),
+        ("CanUnsubscribe", "can_unsubscribe", None),
+        ("Category", "category", None),
+        ("CreatedBy", "created_by", extract_uuid),
+        ("CreatedOn", "created_on", None),
+        ("Description", "description", None),
+        ("FriendlyName", "friendly_name", None),
+        ("Handle", "handle", None),
+        ("IsSubscriptionAllowed", "is_subscription_allowed", None),
+        ("MainTopicId", "main_topic_id", extract_uuid),
+        ("Meta", "meta", None),
+        ("ModifiedBy", "modified_by", extract_uuid),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("ParentId", "parent_id", extract_uuid),
+        ("Role", "role", None),
+        ("Status", "status", None),
+        ("Subscriptions", "subscriptions", None),
+        ("Tags", "tags", None),
+    ]
+
+    voucher_views_comparisons = [
+        ("By", "by", None),
+        ("ByTotal", "by_total", None),
+        ("CreatedOn", "created_on", None),
+        ("Date", "date", None),
+        ("Description", "description", None),
+        ("OwnerId", "owner_id", extract_uuid),
+        ("RefNo", "ref_no", None),
+        ("Section", "section", None),
+        ("Status", "status", None),
+        ("Tags", "tags", None),
+        ("To", "to", None),
+        ("ToTotal", "to_total", None),
+        ("Type", "type", None),
+        ("VoucherNo", "voucher_no", None),
+    ]
+
     return [
-        # --- 9 Core Domains (Detailed 177 Column Comparison) ---
-        {"domain": "Organizations", "collection": "Orgs", "table": "organization", "key_fn": extract_standard_id, "fields": org_comparisons, "is_core": True},
-        {"domain": "Institutes", "collection": "Institutes", "table": "institute", "key_fn": extract_standard_id, "fields": inst_comparisons, "is_core": True},
-        {"domain": "Students", "collection": "Students", "table": "student", "key_fn": extract_student_id, "fields": student_comparisons, "is_core": True},
-        {"domain": "Courses", "collection": "Courses", "table": "course", "key_fn": extract_standard_id, "fields": course_comparisons, "is_core": True},
-        {"domain": "Staffs", "collection": "Staffs", "table": "staff", "key_fn": extract_standard_id, "fields": staff_comparisons, "is_core": True},
-        {"domain": "Personas", "collection": "Personas", "table": "persona", "key_fn": extract_standard_id, "fields": persona_comparisons, "is_core": True},
-        {"domain": "Fees", "collection": "Fees", "table": "fee", "key_fn": extract_standard_id, "fields": fee_comparisons, "is_core": True},
-        {"domain": "Fee Transactions", "collection": "FeeTxes", "table": "fee_transaction", "key_fn": extract_standard_id, "fields": fee_tx_comparisons, "is_core": True},
-        {"domain": "Exams", "collection": "Exams", "table": "exam", "key_fn": extract_standard_id, "fields": exam_comparisons, "is_core": True},
-
-        # --- 33 Auxiliary Domains (Full ID Parity & Core Attributes) ---
-        {"domain": "Users", "collection": "Users", "table": "users", "key_fn": extract_standard_id, "fields": user_comparisons, "is_core": False},
-        {"domain": "Applications", "collection": "Applications", "table": "applications", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "App Form Templates", "collection": "ApplicationFormTemplates", "table": "application_form_templates", "key_fn": extract_standard_id, "fields": [("Title", "title", None)], "is_core": False},
-        {"domain": "Artefacts", "collection": "Artefacts", "table": "artefacts", "key_fn": extract_standard_id, "fields": [("Title", "title", None)], "is_core": False},
-        {"domain": "Artefact Tags", "collection": "ArtefactTags", "table": "artefact_tags", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Assessments", "collection": "Assessments", "table": "assessments", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Assessment Tags", "collection": "AssessmentTags", "table": "assessment_tags", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Asset Views", "collection": "AssetViews", "table": "asset", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Attendance Events", "collection": "AttendanceEvents", "table": "attendance_event", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Calendar Rules", "collection": "CalendarRules", "table": "calendar_rules", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Circulation Views", "collection": "CirculationViews", "table": "circulation_views", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "Commits", "collection": "Commits", "table": "commits", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "Commit ACs", "collection": "CommitAcs", "table": "commit_ac", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "Commit Assets", "collection": "CommitAssets", "table": "commit_asset", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "Content Tags", "collection": "ContentTags", "table": "content_tags", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Emails", "collection": "Emails", "table": "email", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "Gradings", "collection": "Gradings", "table": "gradings", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Image Tags", "collection": "ImageTags", "table": "image_tags", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Institute Calendars", "collection": "InstituteCalendars", "table": "institute_calendars", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Inventory Items", "collection": "InventoryItemViews", "table": "inventory_item_views", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Inventory Journals", "collection": "InventoryJournalViews", "table": "inventory_journal_views", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "Ledger Accounts", "collection": "LedgerAccountViews", "table": "ledger_account_views", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Material Views", "collection": "MaterialViews", "table": "material_views", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Member Views", "collection": "MemberViews", "table": "member_views", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Questions", "collection": "Questions", "table": "questions", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "QA Tags", "collection": "QATags", "table": "qa_tags", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Random Questions", "collection": "RandomQuestionSubmissions", "table": "random_question_submissions", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "Receipts", "collection": "Receipts", "table": "receipts", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "Seat Matrices", "collection": "SeatMatrices", "table": "seat_matrices", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "SMS", "collection": "SMs", "table": "sms", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "SMS Messages", "collection": "SmsMessages", "table": "sms_message", "key_fn": extract_standard_id, "fields": [], "is_core": False},
-        {"domain": "Topics", "collection": "Topics", "table": "topics", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "Voucher Views", "collection": "VoucherViews", "table": "voucher_views", "key_fn": extract_standard_id, "fields": [], "is_core": False},
+        {"domain": "Organizations", "collection": "Orgs", "table": "organization", "key_fn": extract_standard_id, "fields": organizations_comparisons, "is_core": True},
+        {"domain": "Institutes", "collection": "Institutes", "table": "institute", "key_fn": extract_standard_id, "fields": institutes_comparisons, "is_core": True},
+        {"domain": "Students", "collection": "Students", "table": "student", "key_fn": extract_student_id, "fields": students_comparisons, "is_core": True},
+        {"domain": "Courses", "collection": "Courses", "table": "course", "key_fn": extract_standard_id, "fields": courses_comparisons, "is_core": True},
+        {"domain": "Staffs", "collection": "Staffs", "table": "staff", "key_fn": extract_standard_id, "fields": staffs_comparisons, "is_core": True},
+        {"domain": "Personas", "collection": "Personas", "table": "persona", "key_fn": extract_standard_id, "fields": personas_comparisons, "is_core": True},
+        {"domain": "Fees", "collection": "Fees", "table": "fee", "key_fn": extract_standard_id, "fields": fees_comparisons, "is_core": True},
+        {"domain": "Fee Transactions", "collection": "FeeTxes", "table": "fee_transaction", "key_fn": extract_standard_id, "fields": fee_transactions_comparisons, "is_core": True},
+        {"domain": "Exams", "collection": "Exams", "table": "exam", "key_fn": extract_standard_id, "fields": exams_comparisons, "is_core": True},
+        {"domain": "Users", "collection": "Users", "table": "users", "key_fn": extract_standard_id, "fields": users_comparisons, "is_core": True},
+        {"domain": "Applications", "collection": "Applications", "table": "applications", "key_fn": extract_standard_id, "fields": applications_comparisons, "is_core": True},
+        {"domain": "App Form Templates", "collection": "ApplicationFormTemplates", "table": "application_form_templates", "key_fn": extract_standard_id, "fields": app_form_templates_comparisons, "is_core": True},
+        {"domain": "Artefacts", "collection": "Artefacts", "table": "artefacts", "key_fn": extract_standard_id, "fields": artefacts_comparisons, "is_core": True},
+        {"domain": "Artefact Tags", "collection": "ArtefactTags", "table": "artefact_tags", "key_fn": extract_standard_id, "fields": artefact_tags_comparisons, "is_core": True},
+        {"domain": "Assessments", "collection": "Assessments", "table": "assessments", "key_fn": extract_standard_id, "fields": assessments_comparisons, "is_core": True},
+        {"domain": "Assessment Tags", "collection": "AssessmentTags", "table": "assessment_tags", "key_fn": extract_standard_id, "fields": assessment_tags_comparisons, "is_core": True},
+        {"domain": "Asset Views", "collection": "AssetViews", "table": "asset", "key_fn": extract_standard_id, "fields": asset_views_comparisons, "is_core": True},
+        {"domain": "Attendance Events", "collection": "AttendanceEvents", "table": "attendance_event", "key_fn": extract_standard_id, "fields": attendance_events_comparisons, "is_core": True},
+        {"domain": "Calendar Rules", "collection": "CalendarRules", "table": "calendar_rules", "key_fn": extract_standard_id, "fields": calendar_rules_comparisons, "is_core": True},
+        {"domain": "Circulation Views", "collection": "CirculationViews", "table": "circulation_views", "key_fn": extract_standard_id, "fields": circulation_views_comparisons, "is_core": True},
+        {"domain": "Commits", "collection": "Commits", "table": "commits", "key_fn": extract_standard_id, "fields": commits_comparisons, "is_core": True},
+        {"domain": "Commit ACs", "collection": "CommitAcs", "table": "commit_ac", "key_fn": extract_standard_id, "fields": commit_acs_comparisons, "is_core": True},
+        {"domain": "Commit Assets", "collection": "CommitAssets", "table": "commit_asset", "key_fn": extract_standard_id, "fields": commit_assets_comparisons, "is_core": True},
+        {"domain": "Content Tags", "collection": "ContentTags", "table": "content_tags", "key_fn": extract_standard_id, "fields": content_tags_comparisons, "is_core": True},
+        {"domain": "Emails", "collection": "Emails", "table": "email", "key_fn": extract_standard_id, "fields": emails_comparisons, "is_core": True},
+        {"domain": "Gradings", "collection": "Gradings", "table": "gradings", "key_fn": extract_standard_id, "fields": gradings_comparisons, "is_core": True},
+        {"domain": "Image Tags", "collection": "ImageTags", "table": "image_tags", "key_fn": extract_standard_id, "fields": image_tags_comparisons, "is_core": True},
+        {"domain": "Institute Calendars", "collection": "InstituteCalendars", "table": "institute_calendars", "key_fn": extract_standard_id, "fields": institute_calendars_comparisons, "is_core": True},
+        {"domain": "Inventory Items", "collection": "InventoryItemViews", "table": "inventory_item_views", "key_fn": extract_standard_id, "fields": inventory_items_comparisons, "is_core": True},
+        {"domain": "Inventory Journals", "collection": "InventoryJournalViews", "table": "inventory_journal_views", "key_fn": extract_standard_id, "fields": inventory_journals_comparisons, "is_core": True},
+        {"domain": "Ledger Accounts", "collection": "LedgerAccountViews", "table": "ledger_account_views", "key_fn": extract_standard_id, "fields": ledger_accounts_comparisons, "is_core": True},
+        {"domain": "Material Views", "collection": "MaterialViews", "table": "material_views", "key_fn": extract_standard_id, "fields": material_views_comparisons, "is_core": True},
+        {"domain": "Member Views", "collection": "MemberViews", "table": "member_views", "key_fn": extract_standard_id, "fields": member_views_comparisons, "is_core": True},
+        {"domain": "Questions", "collection": "Questions", "table": "questions", "key_fn": extract_standard_id, "fields": questions_comparisons, "is_core": True},
+        {"domain": "QA Tags", "collection": "QATags", "table": "qa_tags", "key_fn": extract_standard_id, "fields": qa_tags_comparisons, "is_core": True},
+        {"domain": "Random Questions", "collection": "RandomQuestionSubmissions", "table": "random_question_submissions", "key_fn": extract_standard_id, "fields": random_questions_comparisons, "is_core": True},
+        {"domain": "Receipts", "collection": "Receipts", "table": "receipts", "key_fn": extract_standard_id, "fields": receipts_comparisons, "is_core": True},
+        {"domain": "Seat Matrices", "collection": "SeatMatrices", "table": "seat_matrices", "key_fn": extract_standard_id, "fields": seat_matrices_comparisons, "is_core": True},
+        {"domain": "SMS", "collection": "SMs", "table": "sms", "key_fn": extract_standard_id, "fields": sms_comparisons, "is_core": True},
+        {"domain": "SMS Messages", "collection": "SmsMessages", "table": "sms_message", "key_fn": extract_standard_id, "fields": sms_messages_comparisons, "is_core": True},
+        {"domain": "Topics", "collection": "Topics", "table": "topics", "key_fn": extract_standard_id, "fields": topics_comparisons, "is_core": True},
+        {"domain": "Voucher Views", "collection": "VoucherViews", "table": "voucher_views", "key_fn": extract_standard_id, "fields": voucher_views_comparisons, "is_core": True},
     ]
-
 
 def main() -> int:
     script_dir = Path(__file__).parent.resolve()

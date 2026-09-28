@@ -618,27 +618,33 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             END IF;
         END $$;
 
-        -- Drop old views if any exist
+        -- Drop legacy child tables and views if they exist from older migrations
+        DROP TABLE IF EXISTS application_form_template_course CASCADE;
+        DROP TABLE IF EXISTS application_form_template_shortlist CASCADE;
+        DROP TABLE IF EXISTS application_form_template CASCADE;
+        DROP TABLE IF EXISTS application CASCADE;
         DO $$
         BEGIN
-            IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'applications') THEN
-                DROP VIEW applications CASCADE;
+            IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'application_form_template_courses') THEN
+                DROP VIEW application_form_template_courses CASCADE;
             END IF;
-            IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'application_form_templates') THEN
-                DROP VIEW application_form_templates CASCADE;
+            IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'application_form_template_shortlists') THEN
+                DROP VIEW application_form_template_shortlists CASCADE;
             END IF;
         END $$;
 
-        -- Drop previous tables to recreate with clean JSONB and ENUM columns
-        DROP TABLE IF EXISTS applications CASCADE;
-        DROP TABLE IF EXISTS application_form_templates CASCADE;
-        DROP TABLE IF EXISTS application CASCADE;
-        DROP TABLE IF EXISTS application_form_template CASCADE;
+        -- Remove any legacy secondary indexes
+        DROP INDEX IF EXISTS application_form_templates_owner_id_idx;
+        DROP INDEX IF EXISTS application_form_templates_created_on_idx;
+        DROP INDEX IF EXISTS applications_template_id_idx;
+        DROP INDEX IF EXISTS applications_owner_id_idx;
+        DROP INDEX IF EXISTS applications_created_on_idx;
+        DROP INDEX IF EXISTS applications_status_idx;
 
-        -- 2. ApplicationFormTemplates Table
+        -- 2. ApplicationFormTemplates Table (Primary key only, no secondary indexes)
         CREATE TABLE IF NOT EXISTS application_form_templates (
             id UUID PRIMARY KEY,
-            title VARCHAR(200),
+            title VARCHAR(255),
             description TEXT,
             options JSONB,
             start_date TIMESTAMPTZ,
@@ -653,12 +659,12 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        -- 3. Applications Table
+        -- 3. Applications Table (Primary key only, no secondary indexes)
         CREATE TABLE IF NOT EXISTS applications (
             id UUID PRIMARY KEY,
-            name VARCHAR(150),
-            email VARCHAR(254),
-            mobile VARCHAR(20),
+            name VARCHAR(255),
+            email VARCHAR(255),
+            mobile VARCHAR(50),
             dob TIMESTAMPTZ,
             residential_status residential_status_enum,
             category applicant_category_enum,
@@ -683,7 +689,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             transfer_certificate_url TEXT,
             leaving_certificate_url TEXT,
             -- Template reference & Application lifecycle
-            application_form_template_id UUID REFERENCES application_form_templates(id),
+            application_form_template_id UUID,
             submitted_on TIMESTAMPTZ,
             application_number INTEGER,
             shortlisted_in INTEGER,
@@ -696,14 +702,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_on TIMESTAMPTZ,
             modified_by UUID
         );
-
-        -- Indexes
-        CREATE INDEX IF NOT EXISTS application_form_templates_owner_id_idx ON application_form_templates (owner_id);
-        CREATE INDEX IF NOT EXISTS application_form_templates_created_on_idx ON application_form_templates (created_on);
-        CREATE INDEX IF NOT EXISTS applications_template_id_idx ON applications (application_form_template_id);
-        CREATE INDEX IF NOT EXISTS applications_owner_id_idx ON applications (owner_id);
-        CREATE INDEX IF NOT EXISTS applications_created_on_idx ON applications (created_on);
-        CREATE INDEX IF NOT EXISTS applications_status_idx ON applications (application_status);
         """
     )
 

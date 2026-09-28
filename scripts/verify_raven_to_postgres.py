@@ -833,7 +833,7 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         # --- 33 Auxiliary Domains (Full ID Parity & Core Attributes) ---
         {"domain": "Users", "collection": "Users", "table": "users", "key_fn": extract_standard_id, "fields": user_comparisons, "is_core": False},
         {"domain": "Applications", "collection": "Applications", "table": "applications", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
-        {"domain": "App Form Templates", "collection": "ApplicationFormTemplates", "table": "application_form_templates", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
+        {"domain": "App Form Templates", "collection": "ApplicationFormTemplates", "table": "application_form_templates", "key_fn": extract_standard_id, "fields": [("Title", "title", None)], "is_core": False},
         {"domain": "Artefacts", "collection": "Artefacts", "table": "artefacts", "key_fn": extract_standard_id, "fields": [("Title", "title", None)], "is_core": False},
         {"domain": "Artefact Tags", "collection": "ArtefactTags", "table": "artefact_tags", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},
         {"domain": "Assessments", "collection": "Assessments", "table": "assessments", "key_fn": extract_standard_id, "fields": [("Name", "name", None)], "is_core": False},

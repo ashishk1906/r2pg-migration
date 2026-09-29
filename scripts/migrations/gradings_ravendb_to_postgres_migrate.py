@@ -32,13 +32,10 @@ UUID_RE = re.compile(
 UUID_NAMESPACE_GRADINGS = uuid.UUID("6ba7b817-9dad-11d1-80b4-00c04fd430c8")
 
 GRADING_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
     1: "Active",
     99: "Disabled",
-    "unknown": "Unknown",
     "active": "Active",
     "disabled": "Disabled",
-    "inactive": "Disabled",
 }
 
 
@@ -269,16 +266,18 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-def map_grading_status(val: Any) -> str:
+def map_grading_status(val: Any) -> Optional[str]:
     """Map status string/int to grading_status_enum."""
     if val is None:
-        return "Active"
+        return None
     if isinstance(val, int):
-        return GRADING_STATUS_MAP.get(val, "Active")
+        return GRADING_STATUS_MAP.get(val)
     s = str(val).strip()
+    if not s:
+        return None
     if s.isdigit():
-        return GRADING_STATUS_MAP.get(int(s), "Active")
-    return GRADING_STATUS_MAP.get(s.lower(), "Active")
+        return GRADING_STATUS_MAP.get(int(s))
+    return GRADING_STATUS_MAP.get(s.lower())
 
 
 # -----------------------------------------------------------------------------
@@ -346,7 +345,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'grading_status_enum') THEN
                 CREATE TYPE grading_status_enum AS ENUM (
-                    'Unknown',
                     'Active',
                     'Disabled'
                 );
@@ -355,7 +353,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 
         CREATE TABLE IF NOT EXISTS gradings (
             id UUID PRIMARY KEY,
-            status grading_status_enum NOT NULL DEFAULT 'Active',
+            status grading_status_enum,
             grading_rules JSONB DEFAULT '[]'::jsonb,
             owner_id UUID,
             parent_id UUID,

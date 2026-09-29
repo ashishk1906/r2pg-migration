@@ -53,7 +53,6 @@ class Config:
     timeout_sec: int
     summary_json_path: Optional[str]
     write_summary_json: bool
-    include_api_payload_validation: bool
     inspect_source_only: bool
 
 
@@ -138,11 +137,6 @@ def parse_args() -> Config:
         help="Disable writing post-run summary JSON artifact.",
     )
     parser.add_argument(
-        "--no-api-payload-validation",
-        action="store_true",
-        help="Disable API-shaped PostgreSQL payload generation in summary JSON.",
-    )
-    parser.add_argument(
         "--inspect-source-only",
         action="store_true",
         help="Fetch RavenDB Exams and print source shape/counts without writing PostgreSQL.",
@@ -214,7 +208,6 @@ def parse_args() -> Config:
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
         write_summary_json=not args.no_summary_json,
-        include_api_payload_validation=not args.no_api_payload_validation,
         inspect_source_only=args.inspect_source_only,
     )
 
@@ -226,75 +219,17 @@ def write_summary_json(path_text: str, payload: Dict[str, Any]) -> str:
     return str(path.resolve())
 
 
-def to_camel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "instId": row["inst_id"],
-        "courseId": row["course_id"],
-        "courseName": row["course_name"],
-        "branch": row["branch"],
-        "term": row["term"],
-        "section": row["section"],
-        "startDate": row["start_date"],
-        "status": row["status"],
-        "conductedOn": row["conducted_on"],
-        "daysWorked": row["days_worked"],
-        "totalMaxMarks": row["total_max_marks"],
-        "lastLockedOn": row["last_locked_on"],
-        "resultDate": row["result_date"],
-    }
 
 
-def iso_utc(value: Any) -> Optional[str]:
+def parse_exam_status(value: Any) -> Optional[str]:
     if value is None:
         return None
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return (
-            value.astimezone(timezone.utc)
-            .replace(tzinfo=None)
-            .isoformat(timespec="microseconds")
-            .rstrip("0")
-            .rstrip(".")
-            + "Z"
-        )
-    return str(value)
-
-
-def decimal_to_float(value: Any) -> Optional[float]:
-    if value is None:
+    val_str = str(value).strip()
+    if not val_str:
         return None
-    if isinstance(value, Decimal):
-        return float(value)
-    return float(value)
-
-
-def exam_status_code(value: Any) -> int:
-    mapping = {
-        "Unknown": 0,
-        "Active": 1,
-        "Scheduled": 10,
-        "Conducted": 20,
-        "Locked": 90,
-        "Disabled": 99,
-    }
-    if value in mapping:
-        return mapping[value]
-    try:
-        val_int = int(value)
-        if val_int in mapping.values():
-            return val_int
-    except (TypeError, ValueError):
-        pass
-    return 0
-
-
-def parse_exam_status(value: Any) -> str:
     valid_names = ("Unknown", "Active", "Scheduled", "Conducted", "Locked", "Disabled")
-    if value in valid_names:
-        return str(value)
+    if val_str in valid_names:
+        return val_str
     try:
         return {
             0: "Unknown",
@@ -303,160 +238,16 @@ def parse_exam_status(value: Any) -> str:
             20: "Conducted",
             90: "Locked",
             99: "Disabled",
-        }.get(int(value), "Active")
+        }.get(int(val_str), None)
     except (TypeError, ValueError):
-        return "Active"
+        return None
 
 
-def build_exams_list_payload(
-    cur: psycopg2.extensions.cursor, params: Dict[str, Any]
-) -> Dict[str, Any]:
-    top = int(params.get("recordsPerPage") or 256)
-    current_page = int(params.get("currentPage") or 0)
-    offset = current_page * top
-
-    cur.execute("SELECT COUNT(*) FROM exam")
-    total_records = int(cur.fetchone()[0])
-
-    sql = """
-        WITH course_lookup AS (
-            SELECT DISTINCT ON (course_id)
-                course_id,
-                course_name,
-                branch
-            FROM (
-                SELECT
-                    c.id AS course_id,
-                    c.name AS course_name,
-                    c.branch
-                FROM course c
-                UNION ALL
-                SELECT
-                    (e.elem ->> 'CourseId')::uuid AS course_id,
-                    e.elem ->> 'CourseName' AS course_name,
-                    e.elem ->> 'Branch' AS branch
-                FROM student s,
-                     jsonb_array_elements(COALESCE(s.enrollments, '[]'::jsonb)) e(elem)
-                WHERE NULLIF(e.elem ->> 'CourseId', '') IS NOT NULL
-            ) combined
-            WHERE course_id IS NOT NULL
-            ORDER BY course_id, course_name NULLS LAST
-        ),
-        exam_projection AS (
-            SELECT
-                e.id::text AS id,
-                e.name,
-                e.inst_id::text AS inst_id,
-                e.course_id::text AS course_id,
-                cl.course_name,
-                cl.branch,
-                e.term,
-                e.section,
-                COALESCE(
-                    (
-                        SELECT (ec.elem ->> 'ScheduledOn')::timestamptz
-                        FROM jsonb_array_elements(
-                            COALESCE(e.exam_contents, '[]'::jsonb)
-                        ) WITH ORDINALITY AS ec(elem, ord)
-                        WHERE NULLIF(ec.elem ->> 'ScheduledOn', '') IS NOT NULL
-                        ORDER BY ec.ord
-                        LIMIT 1
-                    ),
-                    e.start_date
-                ) AS start_date,
-            e.status,
-            (
-                SELECT MAX((ec.elem ->> 'ConductedOn')::timestamptz)
-                FROM jsonb_array_elements(
-                    COALESCE(e.exam_contents, '[]'::jsonb)
-                ) ec(elem)
-                WHERE NULLIF(ec.elem ->> 'ConductedOn', '') IS NOT NULL
-            ) AS conducted_on,
-            e.days_worked,
-            e.total_max_marks,
-            (
-                SELECT MAX((lh.elem ->> 'On')::timestamptz)
-                FROM jsonb_array_elements(
-                    COALESCE(e.lock_history, '[]'::jsonb)
-                ) lh(elem)
-                WHERE NULLIF(lh.elem ->> 'On', '') IS NOT NULL
-            ) AS last_locked_on,
-            e.result_date
-        FROM exam e
-        LEFT JOIN course_lookup cl
-            ON cl.course_id = e.course_id
-    )
-    SELECT
-        id,
-        name,
-        inst_id,
-        course_id,
-        course_name,
-        branch,
-        term,
-        section,
-        start_date,
-        status,
-        conducted_on,
-        days_worked,
-        total_max_marks,
-        last_locked_on,
-        result_date
-    FROM exam_projection
-    ORDER BY
-        COALESCE(start_date, result_date) DESC NULLS LAST,
-        name,
-        id
-    LIMIT %s OFFSET %s
-    """
-    cur.execute(sql, (top, offset))
-    columns = [desc[0] for desc in cur.description]
-    rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-
-    data = []
-    for row in rows:
-        row["start_date"] = iso_utc(row["start_date"])
-        row["status"] = exam_status_code(row["status"])
-        row["conducted_on"] = iso_utc(row["conducted_on"])
-        row["total_max_marks"] = decimal_to_float(row["total_max_marks"])
-        row["last_locked_on"] = iso_utc(row["last_locked_on"])
-        row["result_date"] = iso_utc(row["result_date"])
-        data.append(to_camel_dict(row))
-
-    total_pages = (total_records + top - 1) // top if top > 0 else 0
-    return {
-        "message": "Retrieved exams",
-        "data": data,
-        "meta": None,
-        "createdOn": iso_utc(datetime.now(timezone.utc)),
-        "requestUrl": None,
-        "requestVerb": None,
-        "pagedResults": False,
-        "currentPage": current_page,
-        "recordsPerPage": top,
-        "totalRecords": total_records,
-        "totalPages": total_pages,
-    }
 
 
-def build_api_payload_validation(
-    cur: psycopg2.extensions.cursor,
-) -> Dict[str, Any]:
-    list_params = {
-        "currentPage": 0,
-        "recordsPerPage": 256,
-    }
-    return {
-        "reference": {
-            "note": "PostgreSQL-derived API-shaped payloads for exam read parity validation.",
-        },
-        "endpoints": {
-            "examsList": {
-                "request": list_params,
-                "response": build_exams_list_payload(cur, list_params),
-            }
-        },
-    }
+
+
+
 
 
 def get_nested(doc: Dict[str, Any], *path: str) -> Any:
@@ -784,9 +575,6 @@ def upsert_exam(
     if not exam_id:
         return None
 
-    cur.execute("SELECT 1 FROM exam WHERE id = %s", (exam_id,))
-    is_new = cur.fetchone() is None
-
     exam_contents_json = as_json(doc.get("ExamContents"))
     lock_history_json = as_json(doc.get("LockHistory"))
     attendance_list_json = as_json(doc.get("AttendanceList"))
@@ -844,7 +632,7 @@ def upsert_exam(
             created_by = EXCLUDED.created_by,
             modified_on = EXCLUDED.modified_on,
             modified_by = EXCLUDED.modified_by
-        RETURNING id;
+        RETURNING (xmax = 0);
         """
     params = (
         exam_id,
@@ -874,7 +662,7 @@ def upsert_exam(
     row = cur.fetchone()
     if not row:
         return None
-    return UpsertResult(str(row[0]), is_new)
+    return UpsertResult(exam_id, bool(row[0]))
 
 
 def build_source_profile(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -970,39 +758,9 @@ def main() -> int:
                     exams_processed += 1
                     exams_inserted += int(result.inserted)
 
-        api_payload_validation: Optional[Dict[str, Any]] = None
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM exam")
             exam_count = int(cur.fetchone()[0])
-            if cfg.include_api_payload_validation:
-                api_payload_validation = build_api_payload_validation(cur)
-
-        summary = {
-            "generated_at_utc": datetime.now(timezone.utc)
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z"),
-            "source": {
-                "raven_url": cfg.raven_url,
-                "raven_db": cfg.raven_db,
-                "exams_collection": cfg.exams_collection,
-            },
-            "target": {
-                "pg_host": cfg.pg_host,
-                "pg_port": cfg.pg_port,
-                "pg_db": cfg.pg_db,
-                "pg_user": cfg.pg_user,
-            },
-            "run_stats": {
-                "exams_processed": exams_processed,
-                "new_exams_inserted": exams_inserted,
-                "skipped_exams_missing_id": skipped_exams_missing_id,
-            },
-            "post_load_counts": {
-                "exam": exam_count,
-            },
-        }
-        if api_payload_validation is not None:
-            summary["api_payload_validation"] = api_payload_validation
 
         print("Migration completed.")
         print(f"exams_processed: {exams_processed}")
@@ -1013,6 +771,12 @@ def main() -> int:
             if not output_path:
                 timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 output_path = f"validation/exams-migration-summary-{timestamp}.json"
+            summary = {
+                "exams_processed": exams_processed,
+                "new_exams_inserted": exams_inserted,
+                "skipped_exams_missing_id": skipped_exams_missing_id,
+                "exam_count": exam_count,
+            }
             written = write_summary_json(output_path, summary)
             print(f"Summary JSON written: {written}")
 

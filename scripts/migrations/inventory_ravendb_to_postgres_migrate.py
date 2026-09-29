@@ -37,26 +37,30 @@ UUID_NAMESPACE_INVENTORY_JOURNALS = uuid.UUID("6ba7b814-9dad-11d1-80b4-00c04fd43
 INVENTORY_STATUS_MAP: Dict[Any, str] = {
     "active": "Active",
     "disabled": "Disabled",
-    "archived": "Archived",
-    "unknown": "Unknown",
     "1": "Active",
     "99": "Disabled",
     1: "Active",
     99: "Disabled",
 }
 
-INVENTORY_TYPE_MAP: Dict[str, str] = {
+INVENTORY_TYPE_MAP: Dict[Any, str] = {
     "item": "Item",
     "group": "Group",
-    "unknown": "Unknown",
+    "1": "Item",
+    "2": "Group",
+    1: "Item",
+    2: "Group",
 }
 
-JOURNAL_ENTRY_TYPE_MAP: Dict[str, str] = {
+JOURNAL_ENTRY_TYPE_MAP: Dict[Any, str] = {
     "cr": "Cr",
     "credit": "Cr",
     "dr": "Dr",
     "debit": "Dr",
-    "unknown": "Unknown",
+    "10": "Dr",
+    "20": "Cr",
+    10: "Dr",
+    20: "Cr",
 }
 
 
@@ -337,30 +341,34 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-def map_inventory_status(raw_val: Any) -> str:
-    """Map status string/int to inventory_status_enum."""
+def map_inventory_status(raw_val: Any) -> Optional[str]:
+    """Map status string/int to inventory_status_enum, preserving None as SQL NULL."""
     if raw_val is None:
-        return "Active"
+        return None
     if isinstance(raw_val, int):
-        return INVENTORY_STATUS_MAP.get(raw_val, "Active")
+        return INVENTORY_STATUS_MAP.get(raw_val, None)
     norm = str(raw_val).strip().lower()
-    return INVENTORY_STATUS_MAP.get(norm, "Active")
+    return INVENTORY_STATUS_MAP.get(norm, None)
 
 
-def map_inventory_type(raw_val: Any) -> str:
-    """Map inventory type string to inventory_type_enum."""
+def map_inventory_type(raw_val: Any) -> Optional[str]:
+    """Map inventory type string/int to inventory_type_enum, preserving None as SQL NULL."""
     if raw_val is None:
-        return "Item"
+        return None
+    if isinstance(raw_val, int):
+        return INVENTORY_TYPE_MAP.get(raw_val, None)
     norm = str(raw_val).strip().lower()
-    return INVENTORY_TYPE_MAP.get(norm, "Item")
+    return INVENTORY_TYPE_MAP.get(norm, None)
 
 
-def map_journal_entry_type(raw_val: Any) -> str:
-    """Map journal entry type string to journal_entry_type_enum."""
+def map_journal_entry_type(raw_val: Any) -> Optional[str]:
+    """Map journal entry type string/int to journal_entry_type_enum, preserving None as SQL NULL."""
     if raw_val is None:
-        return "Cr"
+        return None
+    if isinstance(raw_val, int):
+        return JOURNAL_ENTRY_TYPE_MAP.get(raw_val, None)
     norm = str(raw_val).strip().lower()
-    return JOURNAL_ENTRY_TYPE_MAP.get(norm, "Cr")
+    return JOURNAL_ENTRY_TYPE_MAP.get(norm, None)
 
 
 # -----------------------------------------------------------------------------
@@ -466,16 +474,13 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'inventory_status_enum') THEN
                 CREATE TYPE inventory_status_enum AS ENUM (
-                    'Unknown',
                     'Active',
-                    'Disabled',
-                    'Archived'
+                    'Disabled'
                 );
             END IF;
 
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'inventory_type_enum') THEN
                 CREATE TYPE inventory_type_enum AS ENUM (
-                    'Unknown',
                     'Item',
                     'Group'
                 );
@@ -483,9 +488,8 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'journal_entry_type_enum') THEN
                 CREATE TYPE journal_entry_type_enum AS ENUM (
-                    'Unknown',
-                    'Cr',
-                    'Dr'
+                    'Dr',
+                    'Cr'
                 );
             END IF;
         END $$;
@@ -494,12 +498,12 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             id UUID PRIMARY KEY,
             name VARCHAR(255),
             group_id UUID,
-            inventory_type inventory_type_enum NOT NULL DEFAULT 'Item',
+            inventory_type inventory_type_enum,
             uom VARCHAR(50),
             owner_id UUID,
             tags TEXT[] DEFAULT '{}'::text[],
             attributes JSONB DEFAULT '{}'::jsonb,
-            status inventory_status_enum NOT NULL DEFAULT 'Active'
+            status inventory_status_enum
         );
 
         CREATE TABLE IF NOT EXISTS inventory_journal_views (
@@ -517,8 +521,8 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             accounting_journal_id UUID,
             party_id UUID,
             party_name VARCHAR(255),
-            journal_entry_type journal_entry_type_enum NOT NULL DEFAULT 'Cr',
-            status inventory_status_enum NOT NULL DEFAULT 'Active'
+            journal_entry_type journal_entry_type_enum,
+            status inventory_status_enum
         );
         """
     )

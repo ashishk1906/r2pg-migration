@@ -289,24 +289,33 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 # Enum Mappings
 # -----------------------------------------------------------------------------
 
+# UserStatusEnum: Unknown=-1, Registered=0, Active=1, Disabled=99
 USER_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
+    -1: "Unknown",
+    0: "Registered",
     1: "Active",
     99: "Disabled",
+    "-1": "Unknown",
+    "0": "Registered",
+    "1": "Active",
+    "99": "Disabled",
     "unknown": "Unknown",
+    "registered": "Registered",
     "active": "Active",
     "disabled": "Disabled",
-    "inactive": "Disabled",
 }
 
-USER_GENDER_MAP: Dict[str, str] = {
+# GenderEnum: Female = 0, Male = 1, NoInfo = 90
+USER_GENDER_MAP: Dict[Any, str] = {
+    0: "Female",
+    1: "Male",
+    90: "NoInfo",
+    "0": "Female",
+    "1": "Male",
+    "90": "NoInfo",
     "female": "Female",
-    "f": "Female",
     "male": "Male",
-    "m": "Male",
-    "other": "Other",
     "noinfo": "NoInfo",
-    "unknown": "NoInfo",
 }
 
 
@@ -321,11 +330,17 @@ def map_user_status(val: Any) -> str:
     return USER_STATUS_MAP.get(s.lower(), "Active")
 
 
-def map_user_gender(val: Any) -> str:
-    if val is None:
-        return "NoInfo"
-    s = str(val).strip().lower()
-    return USER_GENDER_MAP.get(s, "NoInfo")
+def map_user_gender(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
+    if isinstance(val, int):
+        return USER_GENDER_MAP.get(val, None)
+    s = str(val).strip()
+    if not s or s.lower() in {"null", "none"}:
+        return None
+    if s.isdigit():
+        return USER_GENDER_MAP.get(int(s), None)
+    return USER_GENDER_MAP.get(s.lower(), None)
 
 
 # -----------------------------------------------------------------------------
@@ -447,6 +462,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_status_enum') THEN
                 CREATE TYPE user_status_enum AS ENUM (
                     'Unknown',
+                    'Registered',
                     'Active',
                     'Disabled'
                 );
@@ -456,11 +472,28 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
                 CREATE TYPE user_gender_enum AS ENUM (
                     'Female',
                     'Male',
-                    'Other',
                     'NoInfo'
                 );
             END IF;
         END $$;
+        """
+    )
+
+    # Ensure missing enum values are added to pre-existing types
+    for val in ('Unknown', 'Registered', 'Active', 'Disabled'):
+        try:
+            cur.execute(f"ALTER TYPE user_status_enum ADD VALUE IF NOT EXISTS '{val}';")
+        except Exception:
+            pass
+
+    for val in ('Female', 'Male', 'NoInfo'):
+        try:
+            cur.execute(f"ALTER TYPE user_gender_enum ADD VALUE IF NOT EXISTS '{val}';")
+        except Exception:
+            pass
+
+    cur.execute(
+        """
 
         -- 2. Create Target Table (No secondary indexes)
         CREATE TABLE IF NOT EXISTS "users" (
@@ -488,7 +521,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             last_name VARCHAR(150),
             name VARCHAR(250),
             title VARCHAR(50),
-            gender user_gender_enum NOT NULL DEFAULT 'NoInfo',
+            gender user_gender_enum,
             dob TIMESTAMPTZ,
             email VARCHAR(255),
             mobile VARCHAR(50),
@@ -506,8 +539,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        -- Backward-compatibility view for singular 'user' query
-        CREATE OR REPLACE VIEW "user" AS SELECT * FROM "users";
         """
     )
 
@@ -699,8 +730,10 @@ def main() -> int:
             password=cfg.pg_password,
         )
         conn.autocommit = True
-        with conn.cursor() as tz_cur:
-            tz_cur.execute("SET TIME ZONE 'UTC';")
+        with conn.cursor() as cur:
+            cur.execute("SET TIME ZONE 'UTC';")
+            print("[3/4] Ensuring target schema...")
+            ensure_target_schema(cur)
         conn.autocommit = False
 
         loaded_users = 0
@@ -708,9 +741,6 @@ def main() -> int:
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/4] Ensuring target schema...")
-                ensure_target_schema(cur)
-
                 print("[4/4] Upserting users...")
                 for d in user_docs:
                     res = upsert_user(cur, d)

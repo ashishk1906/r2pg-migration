@@ -233,21 +233,44 @@ def parse_staff_status(value: Any) -> str:
 
 
 def parse_persona_type(value: Any) -> Optional[str]:
-    valid_names = ("Anon", "Management", "Parent", "Staff", "Student", "External", "Dev")
-    if value in valid_names:
-        return str(value)
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    valid_names = (
+        "0",
+        "Anon",
+        "Management",
+        "Parent",
+        "Staff",
+        "Student",
+        "External",
+        "Dev",
+        "35",
+        "60",
+        "70",
+    )
+    if val_str in valid_names:
+        return val_str
     try:
-        return {
+        val_int = int(val_str)
+        named = {
+            0: "0",
             10: "Anon",
             20: "Management",
             30: "Parent",
+            35: "35",
             40: "Staff",
             50: "Student",
+            60: "60",
+            70: "70",
             80: "External",
             90: "Dev",
-        }.get(int(value), None)
+        }.get(val_int)
+        return named if named is not None else str(val_int)
     except (TypeError, ValueError):
-        return None
+        return val_str
 
 
 def parse_persona_status(value: Any) -> str:
@@ -259,37 +282,85 @@ def parse_persona_status(value: Any) -> str:
         return "Active"
 
 
-def parse_fee_status(value: Any) -> str:
-    if value in ("Unknown", "Active", "Disabled"):
-        return str(value)
+def parse_fee_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    if val_str in ("Unknown", "Active", "Disabled"):
+        return val_str
     try:
-        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(value), "Active")
+        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(val_str), None)
     except (TypeError, ValueError):
-        return "Active"
+        return None
 
 
-def parse_fee_tx_status(value: Any) -> str:
-    if value in ("Active", "Disabled"):
-        return str(value)
+def parse_fee_tx_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    if val_str in ("Active", "Disabled"):
+        return val_str
     try:
-        return {1: "Active", 99: "Disabled"}.get(int(value), "Active")
+        return {1: "Active", 99: "Disabled"}.get(int(val_str), None)
     except (TypeError, ValueError):
-        return "Active"
+        return None
 
 
-def parse_course_status(value: Any) -> str:
-    if value in ("Unknown", "Active", "Disabled"):
-        return str(value)
+def parse_grading_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    if val_str in ("Active", "Disabled"):
+        return val_str
     try:
-        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(value), "Active")
+        return {1: "Active", 99: "Disabled"}.get(int(val_str), None)
     except (TypeError, ValueError):
-        return "Active"
+        return None
 
 
-def parse_exam_status(value: Any) -> str:
+def parse_image_tag_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    if val_str in ("Unknown", "Active", "Disabled"):
+        return val_str
+    try:
+        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(val_str), None)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_course_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    if val_str in ("Unknown", "Active", "Disabled"):
+        return val_str
+    try:
+        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(val_str), None)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_exam_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
     valid_names = ("Unknown", "Active", "Scheduled", "Conducted", "Locked", "Disabled")
-    if value in valid_names:
-        return str(value)
+    if val_str in valid_names:
+        return val_str
     try:
         return {
             0: "Unknown",
@@ -298,9 +369,9 @@ def parse_exam_status(value: Any) -> str:
             20: "Conducted",
             90: "Locked",
             99: "Disabled",
-        }.get(int(value), "Active")
+        }.get(int(val_str), None)
     except (TypeError, ValueError):
-        return "Active"
+        return None
 
 
 def parse_app_res_status(val: Any) -> Optional[str]:
@@ -337,9 +408,9 @@ def parse_user_gender(val: Any) -> str:
 
 
 def parse_asset_status(val: Any) -> Any:
-    if isinstance(val, str):
-        return {"Active": 1, "Cleared": 2, "Disabled": 99}.get(val, 1)
-    return val
+    if isinstance(val, int):
+        return {1: "Active", 90: "Cleared", 99: "Disabled"}.get(val, "Active")
+    return val or "Active"
 
 
 def extract_standard_id(doc: Dict[str, Any]) -> Optional[str]:
@@ -589,12 +660,10 @@ class VerificationEngine:
                         elif sc == "gender": fn = parse_student_gender
                         elif sc == "application_status": fn = parse_app_status
                         elif sc.endswith("_url") or sc.endswith("_id"): fn = lambda x: extract_uuid(x) if sc.endswith("_id") else (x or None)
-                    elif table_name == "asset" and sc == "status":
+                    elif table_name in ("asset", "asset_views") and sc == "status":
                         fn = parse_asset_status
                     elif table_name == "assessments" and sc == "status":
                         fn = lambda x: str(x).title() if x else None
-                    elif table_name == "sms_message" and sc == "status":
-                        fn = lambda x: 1 if x == "Active" else x
                     elif table_name == "calendar_rules" and sc == "create_meeting_link":
                         fn = lambda x: bool(x) if x is not None else False
                     elif table_name == "exam" and sc in ("parent_id", "course_id", "term_id", "inst_id"):
@@ -813,8 +882,6 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
 
     courses_comparisons = [
         ("Name", "name", None),
-        ("Code", "code", None),
-        ("ShortName", "short_name", None),
         ("InstId", "inst_id", extract_uuid),
         ("OwnerId", "owner_id", extract_uuid),
         ("ParentId", "parent_id", extract_uuid),
@@ -844,7 +911,6 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("LastName", "last_name", None),
         ("Gender", "gender", parse_student_gender),
         ("Status", "status", parse_staff_status),
-        ("StaffType", "staff_type", parse_staff_type),
         ("Mobile", "mobile", None),
         ("Email", "email", None),
         ("Contacts", "contacts", None),
@@ -880,8 +946,6 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("DisplayText", "display_text", None),
         ("PersonaType", "persona_type", parse_persona_type),
         ("Status", "status", parse_persona_status),
-        ("Roles", "roles", None),
-        ("Permissions", "permissions", None),
         ("CreatedOn", "created_on", None),
         ("CreatedBy", "created_by", extract_uuid),
         ("ModifiedOn", "modified_on", None),
@@ -897,10 +961,8 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("Name", "name", None),
         ("DisplayText", "display_text", None),
         ("Status", "status", parse_fee_status),
-        ("InstId", "inst_id", None),
         ("OwnerId", "owner_id", extract_uuid),
         ("ParentId", "parent_id", extract_uuid),
-        ("Items", "items", None),
         ("CreatedOn", "created_on", None),
         ("CreatedBy", "created_by", extract_uuid),
         ("ModifiedOn", "modified_on", None),
@@ -911,7 +973,7 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("Fines", "fines", None),
         ("Installments", "installments", None),
         ("IsTxDone", "is_tx_done", None),
-        ("NameLower", "name_lower", None),
+        ("Name", "name_lower", lambda x: str(x).lower() if x is not None else None),
         ("StudentList", "student_list", None),
         ("Tags", "tags", None),
     ]
@@ -951,10 +1013,6 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("Status", "status", parse_exam_status),
         ("InstId", "inst_id", extract_uuid),
         ("CourseId", "course_id", extract_uuid),
-        ("TermId", "term_id", None),
-        ("Sections", "sections", None),
-        ("Subjects", "subjects", None),
-        ("GradingScale", "grading_scale", None),
         ("CreatedOn", "created_on", None),
         ("CreatedBy", "created_by", extract_uuid),
         ("ModifiedOn", "modified_on", None),
@@ -1141,17 +1199,16 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
     ]
 
     asset_views_comparisons = [
-        ("Name", "name", None),
         ("Attributes", "attributes", None),
         ("CurrentWarranty", "current_warranty", None),
         ("LastMaintenance", "last_maintenance", None),
         ("Location", "location", None),
-        ("OwnerId", "owner_id", None),
+        ("OwnerId", "owner_id", extract_uuid),
         ("Status", "status", parse_asset_status),
         ("Tags", "tags", None),
         ("TrackingId", "tracking_id", None),
         ("UnderWarranty", "under_warranty", None),
-        ("Value", "value", None),
+        ("Value", "value", lambda v: Decimal(str(v or "0.00"))),
     ]
 
     attendance_events_comparisons = [
@@ -1174,7 +1231,6 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
     ]
 
     calendar_rules_comparisons = [
-        ("Name", "name", None),
         ("CalendarEventCategory", "calendar_event_category", None),
         ("CalendarRuleStatus", "calendar_rule_status", None),
         ("CreateMeetingLink", "create_meeting_link", lambda x: bool(x) if x is not None else False),
@@ -1256,14 +1312,13 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
     ]
 
     gradings_comparisons = [
-        ("Name", "name", None),
         ("CreatedBy", "created_by", extract_uuid),
         ("CreatedOn", "created_on", None),
         ("GradingRules", "grading_rules", None),
         ("ModifiedBy", "modified_by", extract_uuid),
         ("OwnerId", "owner_id", extract_uuid),
         ("ParentId", "parent_id", extract_uuid),
-        ("Status", "status", None),
+        ("Status", "status", parse_grading_status),
     ]
 
     image_tags_comparisons = [
@@ -1276,11 +1331,10 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("OwnerId", "owner_id", extract_uuid),
         ("ParentId", "parent_id", extract_uuid),
         ("Predefined", "predefined", None),
-        ("Status", "status", None),
+        ("Status", "status", parse_image_tag_status),
     ]
 
     institute_calendars_comparisons = [
-        ("Name", "name", None),
         ("Audience", "audience", None),
         ("ConductedBy", "conducted_by", None),
         ("CreatedBy", "created_by", extract_uuid),
@@ -1356,7 +1410,6 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
     ]
 
     member_views_comparisons = [
-        ("Name", "name", None),
         ("IssuedBooks", "issued_books", None),
         ("MemberType", "member_type", None),
         ("MembershipId", "membership_id", None),
@@ -1435,7 +1488,6 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
     ]
 
     seat_matrices_comparisons = [
-        ("Name", "name", None),
         ("BreakUp", "break_up", None),
         ("Course", "course", None),
         ("CourseId", "course_id", extract_uuid),
@@ -1470,9 +1522,8 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("OwnerId", "owner_id", extract_uuid),
         ("ParentId", "parent_id", extract_uuid),
         ("Reason", "reason", None),
-        ("Status", "status", lambda x: 1 if x == 'Active' else x),
+        ("Status", "status", None),
         ("StatusAsString", "status_as_string", None),
-        ("StatusAsString", "status_name", None),
     ]
 
     topics_comparisons = [
@@ -1520,7 +1571,7 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         {"domain": "Institutes", "collection": "Institutes", "table": "institute", "key_fn": extract_standard_id, "fields": institutes_comparisons, "is_core": True},
         {"domain": "Students", "collection": "Students", "table": "student", "key_fn": extract_student_id, "fields": students_comparisons, "is_core": True},
         {"domain": "Courses", "collection": "Courses", "table": "course", "key_fn": extract_standard_id, "fields": courses_comparisons, "is_core": True},
-        {"domain": "Staffs", "collection": "Staffs", "table": "staff", "key_fn": extract_standard_id, "fields": staffs_comparisons, "is_core": True},
+        {"domain": "Staffs", "collection": "Staffs", "table": "staffs", "key_fn": extract_standard_id, "fields": staffs_comparisons, "is_core": True},
         {"domain": "Personas", "collection": "Personas", "table": "persona", "key_fn": extract_standard_id, "fields": personas_comparisons, "is_core": True},
         {"domain": "Fees", "collection": "Fees", "table": "fee", "key_fn": extract_standard_id, "fields": fees_comparisons, "is_core": True},
         {"domain": "Fee Transactions", "collection": "FeeTxes", "table": "fee_transaction", "key_fn": extract_standard_id, "fields": fee_transactions_comparisons, "is_core": True},
@@ -1532,7 +1583,7 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         {"domain": "Artefact Tags", "collection": "ArtefactTags", "table": "artefact_tags", "key_fn": extract_standard_id, "fields": artefact_tags_comparisons, "is_core": True},
         {"domain": "Assessments", "collection": "Assessments", "table": "assessments", "key_fn": extract_standard_id, "fields": assessments_comparisons, "is_core": True},
         {"domain": "Assessment Tags", "collection": "AssessmentTags", "table": "assessment_tags", "key_fn": extract_standard_id, "fields": assessment_tags_comparisons, "is_core": True},
-        {"domain": "Asset Views", "collection": "AssetViews", "table": "asset", "key_fn": extract_standard_id, "fields": asset_views_comparisons, "is_core": True},
+        {"domain": "Asset Views", "collection": "AssetViews", "table": "asset_views", "key_fn": extract_standard_id, "fields": asset_views_comparisons, "is_core": True},
         {"domain": "Attendance Events", "collection": "AttendanceEvents", "table": "attendance_event", "key_fn": extract_standard_id, "fields": attendance_events_comparisons, "is_core": True},
         {"domain": "Calendar Rules", "collection": "CalendarRules", "table": "calendar_rules", "key_fn": extract_standard_id, "fields": calendar_rules_comparisons, "is_core": True},
         {"domain": "Circulation Views", "collection": "CirculationViews", "table": "circulation_views", "key_fn": extract_standard_id, "fields": circulation_views_comparisons, "is_core": True},

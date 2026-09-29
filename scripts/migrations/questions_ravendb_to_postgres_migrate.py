@@ -351,7 +351,6 @@ QA_TAG_STATUS_MAP: Dict[Any, str] = {
     "unknown": "Unknown",
     "active": "Active",
     "disabled": "Disabled",
-    "inactive": "Disabled",
 }
 
 # QuestionStatusEnum: unknown = 0, active = 1, disabled = 99, published = 50, wip = 40, archived = 80
@@ -368,7 +367,6 @@ QUESTION_STATUS_MAP: Dict[Any, str] = {
     "published": "published",
     "archived": "archived",
     "disabled": "disabled",
-    "inactive": "disabled",
 }
 
 # AnswerEnum: Text = 1, OneOf = 2, ManyOf = 3
@@ -392,49 +390,49 @@ QUESTION_DIFFICULTY_MAP: Dict[Any, str] = {
 }
 
 
-def map_qa_tag_status(val: Any) -> str:
+def map_qa_tag_status(val: Any) -> Optional[str]:
     if val is None:
-        return "Active"
+        return None
     if isinstance(val, int):
-        return QA_TAG_STATUS_MAP.get(val, "Active")
+        return QA_TAG_STATUS_MAP.get(val)
     s = str(val).strip()
     if s.isdigit():
-        return QA_TAG_STATUS_MAP.get(int(s), "Active")
-    return QA_TAG_STATUS_MAP.get(s.lower(), "Active")
+        return QA_TAG_STATUS_MAP.get(int(s))
+    return QA_TAG_STATUS_MAP.get(s.lower())
 
 
-def map_question_status(val: Any) -> str:
+def map_question_status(val: Any) -> Optional[str]:
     if val is None:
-        return "wip"
+        return None
     if isinstance(val, int):
-        return QUESTION_STATUS_MAP.get(val, "wip")
+        return QUESTION_STATUS_MAP.get(val)
     s = str(val).strip()
     if s.isdigit():
-        return QUESTION_STATUS_MAP.get(int(s), "wip")
-    return QUESTION_STATUS_MAP.get(s.lower(), "wip")
+        return QUESTION_STATUS_MAP.get(int(s))
+    return QUESTION_STATUS_MAP.get(s.lower())
 
 
-def map_question_answer_type(val: Any) -> str:
+def map_question_answer_type(val: Any) -> Optional[str]:
     if val is None:
-        return "Text"
+        return None
     if isinstance(val, int):
-        return QUESTION_ANSWER_TYPE_MAP.get(val, "Text")
+        return QUESTION_ANSWER_TYPE_MAP.get(val)
     s = str(val).strip()
     if s.isdigit():
-        return QUESTION_ANSWER_TYPE_MAP.get(int(s), "Text")
+        return QUESTION_ANSWER_TYPE_MAP.get(int(s))
     norm = s.lower().replace(" ", "").replace("_", "")
-    return QUESTION_ANSWER_TYPE_MAP.get(norm, "Text")
+    return QUESTION_ANSWER_TYPE_MAP.get(norm)
 
 
-def map_question_difficulty(val: Any) -> str:
+def map_question_difficulty(val: Any) -> Optional[str]:
     if val is None:
-        return "low"
+        return None
     if isinstance(val, int):
-        return QUESTION_DIFFICULTY_MAP.get(val, "low")
+        return QUESTION_DIFFICULTY_MAP.get(val)
     s = str(val).strip()
     if s.isdigit():
-        return QUESTION_DIFFICULTY_MAP.get(int(s), "low")
-    return QUESTION_DIFFICULTY_MAP.get(s.lower(), "low")
+        return QUESTION_DIFFICULTY_MAP.get(int(s))
+    return QUESTION_DIFFICULTY_MAP.get(s.lower())
 
 
 # -----------------------------------------------------------------------------
@@ -504,7 +502,7 @@ def extract_question_fields(doc: Dict[str, Any]) -> Tuple:
     answer_type = map_question_answer_type(doc.get("AnswerType"))
     hints = as_json(doc.get("Hints") if isinstance(doc.get("Hints"), list) else [], default_val=[])
     instruction = clean_str(doc.get("Instruction"))
-    default_weightage = clean_decimal(doc.get("DefaultWeightage"), default=Decimal("1.00"))
+    default_weightage = clean_decimal(doc.get("DefaultWeightage"))
     sub_questions = as_json(clean_sub_questions(doc.get("Questions")), default_val=[])
     difficulty = map_question_difficulty(doc.get("Difficulty"))
     keywords = clean_string_list(doc.get("Keywords"))
@@ -642,7 +640,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             predefined BOOLEAN DEFAULT FALSE,
             csn VARCHAR(50),
             meta JSONB DEFAULT '{}'::jsonb,
-            status qa_tag_status_enum NOT NULL DEFAULT 'Active',
+            status qa_tag_status_enum,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,
@@ -659,13 +657,13 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             tag_list TEXT[] DEFAULT '{}'::text[],
             options JSONB DEFAULT '[]'::jsonb,
             meta JSONB DEFAULT '{}'::jsonb,
-            status question_status_enum NOT NULL DEFAULT 'wip',
-            answer_type question_answer_type_enum NOT NULL DEFAULT 'Text',
+            status question_status_enum,
+            answer_type question_answer_type_enum,
             hints JSONB DEFAULT '[]'::jsonb,
             instruction TEXT,
-            default_weightage NUMERIC(10, 2) DEFAULT 1.00,
+            default_weightage NUMERIC(10, 2),
             questions JSONB DEFAULT '[]'::jsonb,
-            difficulty question_difficulty_enum NOT NULL DEFAULT 'low',
+            difficulty question_difficulty_enum,
             keywords TEXT[] DEFAULT '{}'::text[],
             isn VARCHAR(50),
             answer_text TEXT,

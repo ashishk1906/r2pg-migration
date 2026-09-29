@@ -38,7 +38,6 @@ IMAGE_TAG_STATUS_MAP: Dict[Any, str] = {
     "unknown": "Unknown",
     "active": "Active",
     "disabled": "Disabled",
-    "inactive": "Disabled",
 }
 
 
@@ -286,16 +285,18 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-def map_image_tag_status(val: Any) -> str:
+def map_image_tag_status(val: Any) -> Optional[str]:
     """Map status string/int to image_tag_status_enum."""
     if val is None:
-        return "Active"
+        return None
     if isinstance(val, int):
-        return IMAGE_TAG_STATUS_MAP.get(val, "Active")
+        return IMAGE_TAG_STATUS_MAP.get(val)
     s = str(val).strip()
+    if not s:
+        return None
     if s.isdigit():
-        return IMAGE_TAG_STATUS_MAP.get(int(s), "Active")
-    return IMAGE_TAG_STATUS_MAP.get(s.lower(), "Active")
+        return IMAGE_TAG_STATUS_MAP.get(int(s))
+    return IMAGE_TAG_STATUS_MAP.get(s.lower())
 
 
 # -----------------------------------------------------------------------------
@@ -382,7 +383,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             predefined BOOLEAN DEFAULT FALSE,
             csn VARCHAR(50),
             meta JSONB DEFAULT '{}'::jsonb,
-            status image_tag_status_enum NOT NULL DEFAULT 'Active',
+            status image_tag_status_enum,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ,

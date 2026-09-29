@@ -3,17 +3,10 @@
 Extract SMS-related data (SMs and SmsMessages) from RavenDB,
 transform it to PostgreSQL schema, and load into PostgreSQL.
 
-Source:
-- SMs collection (ct._Core.Repo.Resource.SMS in ct.connect)
-- SmsMessages collection (ct.connect.Repo.Resource.SmsMessage in ct.connect)
-
 Target tables:
 - sms
 - sms_message
 
-Target enums:
-- sms_gateway_enum ('Unknown', 'Infini')
-- sms_message_status_enum ('Pending', 'Active', 'Disapproved', 'Disabled')
 """
 
 from __future__ import annotations
@@ -36,28 +29,30 @@ UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 
-# Gateway enum mapping
-GATEWAY_NAME_TO_INT = {
-    "unknown": -1,
-    "infini": 2,
-}
-GATEWAY_INT_TO_NAME = {
+# Gateway enum mapping: Unknown = -1, Infini = 2
+GATEWAY_MAP: Dict[Any, str] = {
     -1: "Unknown",
     2: "Infini",
+    "-1": "Unknown",
+    "2": "Infini",
+    "unknown": "Unknown",
+    "infini": "Infini",
 }
 
-# SMS Message status enum mapping
-STATUS_NAME_TO_INT = {
-    "pending": 0,
-    "active": 1,
-    "disapproved": 90,
-    "disabled": 99,
-}
-STATUS_INT_TO_NAME = {
+# SMS Message status enum mapping: Pending = 0, Active = 1, Disapproved = 90, Disabled = 99
+SMS_MESSAGE_STATUS_MAP: Dict[Any, str] = {
     0: "Pending",
     1: "Active",
     90: "Disapproved",
     99: "Disabled",
+    "0": "Pending",
+    "1": "Active",
+    "90": "Disapproved",
+    "99": "Disabled",
+    "pending": "Pending",
+    "active": "Active",
+    "disapproved": "Disapproved",
+    "disabled": "Disabled",
 }
 
 
@@ -361,32 +356,26 @@ def map_gateway(val: Any) -> str:
     """Map gateway value (string or integer) to sms_gateway_enum name ('Unknown', 'Infini')."""
     if val is None:
         return "Unknown"
-    val_str = str(val).strip()
-    try:
-        # If integer
-        val_int = int(val_str)
-        return GATEWAY_INT_TO_NAME.get(val_int, "Unknown")
-    except ValueError:
-        # String name
-        code = GATEWAY_NAME_TO_INT.get(val_str.lower(), -1)
-        return GATEWAY_INT_TO_NAME.get(code, "Unknown")
+    if isinstance(val, int):
+        return GATEWAY_MAP.get(val, "Unknown")
+    s = str(val).strip()
+    if s.lstrip("-").isdigit():
+        return GATEWAY_MAP.get(int(s), "Unknown")
+    return GATEWAY_MAP.get(s.lower(), "Unknown")
 
 
-def map_status(val: Any) -> Tuple[int, str]:
-    """Map status value (string or integer) to (integer_code, enum_name)."""
+def map_sms_message_status(val: Any) -> str:
+    """Map status value to SmsMessageStatusEnum name ('Pending', 'Active', 'Disapproved', 'Disabled').
+    Matches .NET constructor default: Status = SmsMessageStatusEnum.Pending.
+    """
     if val is None:
-        return 0, "Pending"
-    val_str = str(val).strip()
-    try:
-        # If integer
-        val_int = int(val_str)
-        name = STATUS_INT_TO_NAME.get(val_int, "Pending")
-        return val_int, name
-    except ValueError:
-        # String name
-        code = STATUS_NAME_TO_INT.get(val_str.lower(), 0)
-        name = STATUS_INT_TO_NAME.get(code, "Pending")
-        return code, name
+        return "Pending"
+    if isinstance(val, int):
+        return SMS_MESSAGE_STATUS_MAP.get(val, "Pending")
+    s = str(val).strip()
+    if s.isdigit():
+        return SMS_MESSAGE_STATUS_MAP.get(int(s), "Pending")
+    return SMS_MESSAGE_STATUS_MAP.get(s.lower(), "Pending")
 
 
 def extract_sms_fields(
@@ -469,7 +458,6 @@ def extract_sms_message_fields(
     str,
     int,
     str,
-    str,
     int,
     int,
     Optional[str],
@@ -491,8 +479,8 @@ def extract_sms_message_fields(
         raise ValueError(f"SmsMessage document missing valid GUID id: {raw_id}")
 
     message = str(doc.get("Message") or "").strip()
-    status_code, status_name = map_status(doc.get("Status"))
-    status_as_string = str(doc.get("StatusAsString") or status_name).strip()
+    status = map_sms_message_status(doc.get("Status"))
+    status_as_string = str(doc.get("StatusAsString") or status).strip()
 
     try:
         length = int(doc.get("Length") or len(message))
@@ -520,8 +508,7 @@ def extract_sms_message_fields(
     return (
         msg_id,
         message,
-        status_code,
-        status_name,
+        status,
         status_as_string,
         length,
         credits_val,
@@ -541,8 +528,7 @@ def extract_sms_message_fields(
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create all enums, tables, views, and indexes idempotently."""
-    # 1. Custom PostgreSQL ENUMs
+    """Create all enums and tables idempotently."""
     cur.execute(
         """
         DO $$
@@ -562,16 +548,11 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
                 );
             END IF;
         END $$;
-        """
-    )
 
-    # 2. sms table
-    cur.execute(
-        """
         CREATE TABLE IF NOT EXISTS sms (
             id UUID PRIMARY KEY,
-            gateway sms_gateway_enum NOT NULL,
-            gateway_result TEXT,
+            gateway sms_gateway_enum NOT NULL DEFAULT 'Unknown',
+            gateway_result VARCHAR(500),
             recipients JSONB NOT NULL DEFAULT '[]'::jsonb,
             message TEXT NOT NULL,
             sms_ref_id VARCHAR(100),
@@ -582,36 +563,14 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_on TIMESTAMPTZ,
             modified_by UUID
         );
-        ALTER TABLE sms DROP COLUMN IF EXISTS gateway_name;
-        ALTER TABLE sms DROP COLUMN IF EXISTS collection;
-        ALTER TABLE sms DROP COLUMN IF EXISTS raven_clr_type;
-        ALTER TABLE sms DROP COLUMN IF EXISTS raven_change_vector;
-        ALTER TABLE sms DROP COLUMN IF EXISTS raven_last_modified;
-        ALTER TABLE sms ALTER COLUMN sms_ref_id TYPE VARCHAR(100);
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'sms' AND column_name = 'gateway' AND data_type = 'integer'
-            ) THEN
-                ALTER TABLE sms DROP COLUMN gateway;
-                ALTER TABLE sms ADD COLUMN gateway sms_gateway_enum NOT NULL DEFAULT 'Unknown';
-            END IF;
-        END $$;
-        """
-    )
 
-    # 3. sms_message table
-    cur.execute(
-        """
         CREATE TABLE IF NOT EXISTS sms_message (
             id UUID PRIMARY KEY,
             message TEXT NOT NULL,
-            status INTEGER NOT NULL,
-            status_name sms_message_status_enum NOT NULL,
-            status_as_string TEXT NOT NULL,
-            length INTEGER NOT NULL,
-            credits INTEGER NOT NULL,
+            status sms_message_status_enum NOT NULL DEFAULT 'Pending',
+            status_as_string VARCHAR(50) NOT NULL DEFAULT 'Pending',
+            length INTEGER NOT NULL DEFAULT 0,
+            credits INTEGER NOT NULL DEFAULT 1,
             reason TEXT,
             owner_id UUID,
             parent_id UUID,
@@ -620,32 +579,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_on TIMESTAMPTZ,
             modified_by UUID
         );
-        ALTER TABLE sms_message DROP COLUMN IF EXISTS collection;
-        ALTER TABLE sms_message DROP COLUMN IF EXISTS raven_clr_type;
-        ALTER TABLE sms_message DROP COLUMN IF EXISTS raven_change_vector;
-        ALTER TABLE sms_message DROP COLUMN IF EXISTS raven_last_modified;
-        """
-    )
-
-    # 4. Indexes
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS sms_owner_id_idx ON sms (owner_id);
-        CREATE INDEX IF NOT EXISTS sms_created_on_idx ON sms (created_on);
-        CREATE INDEX IF NOT EXISTS sms_created_by_idx ON sms (created_by);
-        CREATE INDEX IF NOT EXISTS sms_gateway_idx ON sms (gateway);
-        CREATE INDEX IF NOT EXISTS sms_recipients_gin_idx ON sms USING GIN (recipients);
-
-        CREATE INDEX IF NOT EXISTS sms_message_owner_id_idx ON sms_message (owner_id);
-        CREATE INDEX IF NOT EXISTS sms_message_created_on_idx ON sms_message (created_on);
-        CREATE INDEX IF NOT EXISTS sms_message_status_idx ON sms_message (status);
-        """
-    )
-
-    # Clean up any previously created views if present
-    cur.execute(
-        """
-        DROP VIEW IF EXISTS sms_messages, v_sms_recipient CASCADE;
         """
     )
 
@@ -735,8 +668,7 @@ def upsert_sms_message_document(
     (
         msg_id,
         message,
-        status_code,
-        status_name,
+        status,
         status_as_string,
         length,
         credits_val,
@@ -754,7 +686,6 @@ def upsert_sms_message_document(
             id,
             message,
             status,
-            status_name,
             status_as_string,
             length,
             credits,
@@ -766,12 +697,11 @@ def upsert_sms_message_document(
             modified_on,
             modified_by
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
             message = EXCLUDED.message,
             status = EXCLUDED.status,
-            status_name = EXCLUDED.status_name,
             status_as_string = EXCLUDED.status_as_string,
             length = EXCLUDED.length,
             credits = EXCLUDED.credits,
@@ -790,8 +720,7 @@ def upsert_sms_message_document(
         (
             msg_id,
             message,
-            status_code,
-            status_name,
+            status,
             status_as_string,
             length,
             credits_val,
@@ -850,8 +779,10 @@ def main() -> int:
             password=cfg.pg_password,
         )
         conn.autocommit = True
-        with conn.cursor() as tz_cur:
-            tz_cur.execute("SET TIME ZONE 'UTC';")
+        with conn.cursor() as cur:
+            cur.execute("SET TIME ZONE 'UTC';")
+            print("[3/5] Ensuring target schema & enums...")
+            ensure_target_schema(cur)
         conn.autocommit = False
 
         loaded_sms = 0
@@ -861,9 +792,6 @@ def main() -> int:
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/5] Ensuring target schema & enums...")
-                ensure_target_schema(cur)
-
                 print("[4/5] Upserting SMs...")
                 for d in sms_docs:
                     res = upsert_sms_document(cur, d)

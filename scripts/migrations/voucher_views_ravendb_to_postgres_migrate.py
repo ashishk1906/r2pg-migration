@@ -291,31 +291,33 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 # Enum Mappings
 # -----------------------------------------------------------------------------
 
-VOUCHER_TYPE_MAP: Dict[str, str] = {
+# VoucherTypeEnum: Expense = 1
+VOUCHER_TYPE_MAP: Dict[Any, str] = {
+    1: "Expense",
+    "1": "Expense",
     "expense": "Expense",
-    "income": "Income",
-    "journal": "Journal",
-    "contra": "Contra",
-    "payment": "Payment",
-    "receipt": "Receipt",
 }
 
+# VoucherStatusEnum: Active = 1, Disabled = 99
 VOUCHER_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
     1: "Active",
     99: "Disabled",
-    "unknown": "Unknown",
+    "1": "Active",
+    "99": "Disabled",
     "active": "Active",
     "disabled": "Disabled",
-    "inactive": "Disabled",
 }
 
 
 def map_voucher_type(val: Any) -> str:
     if val is None:
         return "Expense"
+    if isinstance(val, int):
+        return VOUCHER_TYPE_MAP.get(val, "Expense")
     s = str(val).strip()
-    return VOUCHER_TYPE_MAP.get(s.lower(), s.capitalize() if s else "Expense")
+    if s.isdigit():
+        return VOUCHER_TYPE_MAP.get(int(s), "Expense")
+    return VOUCHER_TYPE_MAP.get(s.lower(), "Expense")
 
 
 def map_voucher_status(val: Any) -> str:
@@ -389,42 +391,20 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     """Create target enums and voucher_views table without secondary indexes."""
     cur.execute(
         """
-        -- 1. Create or extend Enums
+        -- 1. Create Enums
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'voucher_type_enum') THEN
                 CREATE TYPE voucher_type_enum AS ENUM (
-                    'Expense',
-                    'Income',
-                    'Journal',
-                    'Contra',
-                    'Payment',
-                    'Receipt',
-                    'Unknown'
+                    'Expense'
                 );
-            ELSE
-                BEGIN
-                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Contra';
-                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Payment';
-                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Receipt';
-                    ALTER TYPE voucher_type_enum ADD VALUE IF NOT EXISTS 'Unknown';
-                EXCEPTION WHEN OTHERS THEN
-                    NULL;
-                END;
             END IF;
 
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'voucher_status_enum') THEN
                 CREATE TYPE voucher_status_enum AS ENUM (
-                    'Unknown',
                     'Active',
                     'Disabled'
                 );
-            ELSE
-                BEGIN
-                    ALTER TYPE voucher_status_enum ADD VALUE IF NOT EXISTS 'Unknown';
-                EXCEPTION WHEN OTHERS THEN
-                    NULL;
-                END;
             END IF;
         END $$;
 
@@ -447,8 +427,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             created_on TIMESTAMPTZ NOT NULL
         );
 
-        -- Backward-compatibility view for case-insensitive access
-        CREATE OR REPLACE VIEW voucherviews AS SELECT * FROM voucher_views;
         """
     )
 
@@ -605,8 +583,10 @@ def main() -> int:
             password=cfg.pg_password,
         )
         conn.autocommit = True
-        with conn.cursor() as tz_cur:
-            tz_cur.execute("SET TIME ZONE 'UTC';")
+        with conn.cursor() as cur:
+            cur.execute("SET TIME ZONE 'UTC';")
+            print("[3/4] Ensuring target schema...")
+            ensure_target_schema(cur)
         conn.autocommit = False
 
         loaded_vouchers = 0
@@ -614,9 +594,6 @@ def main() -> int:
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/4] Ensuring target schema...")
-                ensure_target_schema(cur)
-
                 print("[4/4] Upserting voucher views...")
                 for d in voucher_docs:
                     res = upsert_voucher_view(cur, d)

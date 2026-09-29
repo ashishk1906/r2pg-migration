@@ -382,13 +382,16 @@ def extract_email_fields(
     recipients = clean_string_list(doc.get("Recipients"))
 
     # 3. Message (HTML body)
-    message = str(doc.get("Message") or "").strip()
+    message_val = doc.get("Message")
+    message = str(message_val).strip() if message_val is not None else None
 
-    # 4. Type (e.g. Generic)
-    type_str = str(doc.get("Type") or "Generic").strip()
+    # 4. Type
+    type_val = doc.get("Type")
+    type_str = str(type_val).strip() if type_val is not None else None
 
     # 5. From address
-    from_addr = str(doc.get("From") or "").strip()
+    from_val = doc.get("From")
+    from_addr = str(from_val).strip() if from_val is not None else None
 
     # 6. Subject
     subject_val = doc.get("Subject")
@@ -451,19 +454,25 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         """
         CREATE TABLE IF NOT EXISTS email (
             id UUID PRIMARY KEY,
-            recipients TEXT[] NOT NULL,
-            message TEXT NOT NULL,
-            type VARCHAR(50) NOT NULL DEFAULT 'Generic',
-            "from" VARCHAR(255) NOT NULL,
+            recipients TEXT[],
+            message TEXT,
+            type VARCHAR(50),
+            "from" VARCHAR(255),
             subject VARCHAR(500),
             attachments JSONB,
             owner_id UUID,
             parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
+            created_on TIMESTAMPTZ,
             created_by UUID,
             modified_on TIMESTAMPTZ,
             modified_by UUID
         );
+        ALTER TABLE email ALTER COLUMN recipients DROP NOT NULL;
+        ALTER TABLE email ALTER COLUMN message DROP NOT NULL;
+        ALTER TABLE email ALTER COLUMN type DROP NOT NULL;
+        ALTER TABLE email ALTER COLUMN type DROP DEFAULT;
+        ALTER TABLE email ALTER COLUMN "from" DROP NOT NULL;
+        ALTER TABLE email ALTER COLUMN created_on DROP NOT NULL;
         ALTER TABLE email DROP COLUMN IF EXISTS from_address;
         ALTER TABLE email DROP COLUMN IF EXISTS audited;
         ALTER TABLE email DROP COLUMN IF EXISTS collection;

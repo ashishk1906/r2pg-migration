@@ -422,7 +422,8 @@ def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
 
     mime_type = clean_str(doc.get("MimeType"), 100)
     file_name = clean_str(doc.get("FileName"), 250)
-    file_size = clean_decimal(doc.get("FileSize"))
+    raw_fs = doc.get("FileSize")
+    file_size = float(raw_fs) if raw_fs is not None else None
     status = map_artefact_status(doc.get("Status"))
     sha1 = clean_str(doc.get("SHA1"), 100)
 
@@ -538,7 +539,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             tags TEXT[] DEFAULT '{}'::text[],
             mime_type VARCHAR(100),
             file_name VARCHAR(250),
-            file_size NUMERIC(18, 2),
+            file_size DOUBLE PRECISION,
             status artefact_status_enum NOT NULL DEFAULT 'Active',
             sha1 VARCHAR(100),
             model TEXT,

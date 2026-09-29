@@ -21,7 +21,7 @@ MODULE_SCRIPTS = [
     ("fees", "fees_ravendb_to_postgres_migrate.py"),
     ("exams", "exams_ravendb_to_postgres_migrate.py"),
     ("applications", "applications_ravendb_to_postgres_migrate.py"),
-    ("assets", "assets_ravendb_to_postgres_migrate.py"),
+    ("assets", "asset_views_ravendb_to_postgres_migrate.py"),
     ("attendance_events", "attendance_events_ravendb_to_postgres_migrate.py"),
     ("commits", "commits_ravendb_to_postgres_migrate.py"),
     ("emails", "emails_ravendb_to_postgres_migrate.py"),

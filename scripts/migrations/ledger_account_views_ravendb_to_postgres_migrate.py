@@ -34,15 +34,13 @@ UUID_NAMESPACE_LEDGER_ACCOUNT_VIEWS = uuid.UUID("6ba7b812-9dad-11d1-80b4-00c04fd
 LEDGER_STATUS_MAP: Dict[Any, str] = {
     "active": "Active",
     "disabled": "Disabled",
-    "archived": "Archived",
-    "unknown": "Unknown",
     "1": "Active",
     "99": "Disabled",
     1: "Active",
     99: "Disabled",
 }
 
-NATURE_OF_ACCOUNTS_MAP: Dict[str, str] = {
+NATURE_OF_ACCOUNTS_MAP: Dict[Any, str] = {
     "inherit": "Inherit",
     "assets": "Assets",
     "asset": "Assets",
@@ -51,13 +49,34 @@ NATURE_OF_ACCOUNTS_MAP: Dict[str, str] = {
     "income": "Income",
     "expenses": "Expenses",
     "expense": "Expenses",
-    "unknown": "Unknown",
+    "0": "Inherit",
+    "10": "Assets",
+    "20": "Liabilities",
+    "30": "Income",
+    "40": "Expenses",
+    0: "Inherit",
+    10: "Assets",
+    20: "Liabilities",
+    30: "Income",
+    40: "Expenses",
 }
 
-LEDGER_TYPE_MAP: Dict[str, str] = {
+LEDGER_TYPE_MAP: Dict[Any, str] = {
     "ledger": "Ledger",
     "group": "Group",
-    "unknown": "Unknown",
+    "1": "Ledger",
+    "2": "Group",
+    1: "Ledger",
+    2: "Group",
+}
+
+LEDGER_OWNER_TYPE_MAP: Dict[Any, str] = {
+    "org": "Org",
+    "inst": "Inst",
+    "1": "Org",
+    "2": "Inst",
+    1: "Org",
+    2: "Inst",
 }
 
 
@@ -258,30 +277,44 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def map_ledger_status(raw_val: Any) -> str:
-    """Map status string/int to ledger_account_status_enum."""
+def map_ledger_status(raw_val: Any) -> Optional[str]:
+    """Map status string/int to ledger_account_status_enum, preserving None as SQL NULL."""
     if raw_val is None:
-        return "Active"
+        return None
     if isinstance(raw_val, int):
-        return LEDGER_STATUS_MAP.get(raw_val, "Active")
+        return LEDGER_STATUS_MAP.get(raw_val, None)
     norm = str(raw_val).strip().lower()
-    return LEDGER_STATUS_MAP.get(norm, "Active")
+    return LEDGER_STATUS_MAP.get(norm, None)
 
 
-def map_nature_of_accounts(raw_val: Any) -> str:
-    """Map nature of accounts string to nature_of_accounts_enum."""
+def map_nature_of_accounts(raw_val: Any) -> Optional[str]:
+    """Map nature of accounts string/int to nature_of_accounts_enum, preserving None as SQL NULL."""
     if raw_val is None:
-        return "Inherit"
+        return None
+    if isinstance(raw_val, int):
+        return NATURE_OF_ACCOUNTS_MAP.get(raw_val, None)
     norm = str(raw_val).strip().lower()
-    return NATURE_OF_ACCOUNTS_MAP.get(norm, "Inherit")
+    return NATURE_OF_ACCOUNTS_MAP.get(norm, None)
 
 
-def map_ledger_type(raw_val: Any) -> str:
-    """Map ledger type string to ledger_type_enum."""
+def map_ledger_type(raw_val: Any) -> Optional[str]:
+    """Map ledger type string/int to ledger_type_enum, preserving None as SQL NULL."""
     if raw_val is None:
-        return "Ledger"
+        return None
+    if isinstance(raw_val, int):
+        return LEDGER_TYPE_MAP.get(raw_val, None)
     norm = str(raw_val).strip().lower()
-    return LEDGER_TYPE_MAP.get(norm, "Ledger")
+    return LEDGER_TYPE_MAP.get(norm, None)
+
+
+def map_ledger_owner_type(raw_val: Any) -> Optional[str]:
+    """Map owner type string/int to ledger_owner_type_enum, preserving None as SQL NULL."""
+    if raw_val is None:
+        return None
+    if isinstance(raw_val, int):
+        return LEDGER_OWNER_TYPE_MAP.get(raw_val, None)
+    norm = str(raw_val).strip().lower()
+    return LEDGER_OWNER_TYPE_MAP.get(norm, None)
 
 
 # -----------------------------------------------------------------------------
@@ -306,7 +339,7 @@ def extract_ledger_account_view_fields(doc: Dict[str, Any]) -> Tuple:
     group_name = clean_str(doc.get("GroupName"), 255)
     owner_id = clean_uuid(doc.get("OwnerId"))
     owner_name = clean_str(doc.get("OwnerName"), 255)
-    owner_type = clean_str(doc.get("OwnerType"), 50)
+    owner_type = map_ledger_owner_type(doc.get("OwnerType"))
     ledger_type = map_ledger_type(doc.get("LedgerType"))
     nature_of_accounts = map_nature_of_accounts(doc.get("NatureOfAccounts"))
     status = map_ledger_status(doc.get("Status"))
@@ -338,16 +371,13 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ledger_account_status_enum') THEN
                 CREATE TYPE ledger_account_status_enum AS ENUM (
-                    'Unknown',
                     'Active',
-                    'Disabled',
-                    'Archived'
+                    'Disabled'
                 );
             END IF;
 
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'nature_of_accounts_enum') THEN
                 CREATE TYPE nature_of_accounts_enum AS ENUM (
-                    'Unknown',
                     'Inherit',
                     'Assets',
                     'Liabilities',
@@ -358,9 +388,15 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ledger_type_enum') THEN
                 CREATE TYPE ledger_type_enum AS ENUM (
-                    'Unknown',
                     'Ledger',
                     'Group'
+                );
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ledger_owner_type_enum') THEN
+                CREATE TYPE ledger_owner_type_enum AS ENUM (
+                    'Org',
+                    'Inst'
                 );
             END IF;
         END $$;
@@ -372,10 +408,10 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             group_name VARCHAR(255),
             owner_id UUID,
             owner_name VARCHAR(255),
-            owner_type VARCHAR(50),
-            ledger_type ledger_type_enum NOT NULL DEFAULT 'Ledger',
-            nature_of_accounts nature_of_accounts_enum NOT NULL DEFAULT 'Inherit',
-            status ledger_account_status_enum NOT NULL DEFAULT 'Active'
+            owner_type ledger_owner_type_enum,
+            ledger_type ledger_type_enum,
+            nature_of_accounts nature_of_accounts_enum,
+            status ledger_account_status_enum
         );
         """
     )

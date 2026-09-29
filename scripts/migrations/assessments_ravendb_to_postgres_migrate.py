@@ -333,13 +333,14 @@ def map_tag_status(val: Any) -> str:
 ASSESSMENT_STATUS_MAP: Dict[Any, str] = {
     0: "Unknown",
     1: "Active",
-    40: "Wip",
+    40: "WIP",
     50: "Published",
     80: "Archived",
     99: "Disabled",
     "unknown": "Unknown",
     "active": "Active",
-    "wip": "Wip",
+    "wip": "WIP",
+    "WIP": "WIP",
     "published": "Published",
     "archived": "Archived",
     "disabled": "Disabled",
@@ -474,7 +475,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
                 CREATE TYPE assessment_status_enum AS ENUM (
                     'Unknown',
                     'Active',
-                    'Wip',
+                    'WIP',
                     'Published',
                     'Archived',
                     'Disabled'

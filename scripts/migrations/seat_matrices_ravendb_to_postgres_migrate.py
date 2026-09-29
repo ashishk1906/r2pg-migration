@@ -5,7 +5,7 @@ transform it to PostgreSQL schema with native PostgreSQL types and JSONBs,
 and load into PostgreSQL.
 
 Target table:
-- seat_matrices (with backward-compatible view: seat_matrix)
+- seat_matrices
 """
 
 from __future__ import annotations
@@ -348,8 +348,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        -- Backward-compatibility view for singular 'seat_matrix'
-        CREATE OR REPLACE VIEW seat_matrix AS SELECT * FROM seat_matrices;
         """
     )
 

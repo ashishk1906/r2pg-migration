@@ -305,83 +305,73 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 # Enum Mappings (Exact match to C# Enums)
 # -----------------------------------------------------------------------------
 
+# PaymentModeEnum: Cash = 10, Cheque = 20, DD = 30, Netbanking = 40, UPI = 50
 PAYMENT_MODE_MAP: Dict[Any, str] = {
     10: "Cash",
     20: "Cheque",
-    30: "DemandDraft",
-    40: "NetBanking",
+    30: "DD",
+    40: "Netbanking",
     50: "UPI",
     "cash": "Cash",
     "cheque": "Cheque",
-    "check": "Cheque",
-    "dd": "DemandDraft",
-    "demanddraft": "DemandDraft",
-    "demand_draft": "DemandDraft",
-    "netbanking": "NetBanking",
-    "net_banking": "NetBanking",
-    "online": "NetBanking",
-    "card": "NetBanking",
+    "dd": "DD",
+    "netbanking": "Netbanking",
     "upi": "UPI",
-    "other": "Other",
-    "unknown": "Unknown",
 }
 
+# ReceiptStatusEnum: Active = 1, Cancelled = 99
 RECEIPT_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
     1: "Active",
     99: "Cancelled",
     "active": "Active",
     "cancelled": "Cancelled",
-    "canceled": "Cancelled",
-    "disabled": "Cancelled",
-    "inactive": "Cancelled",
-    "unknown": "Unknown",
 }
 
+# ReceiptTypeEnum: Unknown = 0, Regular = 10, Donation = 20
 RECEIPT_TYPE_MAP: Dict[Any, str] = {
     0: "Unknown",
     10: "Regular",
     20: "Donation",
+    "unknown": "Unknown",
     "regular": "Regular",
     "donation": "Donation",
-    "unknown": "Unknown",
 }
 
 
-def map_payment_mode(val: Any) -> str:
+def map_payment_mode(val: Any) -> Optional[str]:
     if val is None:
-        return "Cash"
+        return None
     if isinstance(val, int):
-        return PAYMENT_MODE_MAP.get(val, "Cash")
+        return PAYMENT_MODE_MAP.get(val)
     s = str(val).strip()
     if s.isdigit():
-        return PAYMENT_MODE_MAP.get(int(s), "Cash")
+        return PAYMENT_MODE_MAP.get(int(s))
     norm = s.lower().replace(" ", "").replace("_", "")
-    return PAYMENT_MODE_MAP.get(norm, "Cash")
+    return PAYMENT_MODE_MAP.get(norm)
 
 
-def map_receipt_status(val: Any) -> str:
+def map_receipt_status(val: Any) -> Optional[str]:
     if val is None:
-        return "Active"
+        return None
     if isinstance(val, int):
-        return RECEIPT_STATUS_MAP.get(val, "Active")
+        return RECEIPT_STATUS_MAP.get(val)
     s = str(val).strip()
     if s.isdigit():
-        return RECEIPT_STATUS_MAP.get(int(s), "Active")
+        return RECEIPT_STATUS_MAP.get(int(s))
     norm = s.lower().replace(" ", "").replace("_", "")
-    return RECEIPT_STATUS_MAP.get(norm, "Active")
+    return RECEIPT_STATUS_MAP.get(norm)
 
 
-def map_receipt_type(val: Any) -> str:
+def map_receipt_type(val: Any) -> Optional[str]:
     if val is None:
-        return "Regular"
+        return None
     if isinstance(val, int):
-        return RECEIPT_TYPE_MAP.get(val, "Regular")
+        return RECEIPT_TYPE_MAP.get(val)
     s = str(val).strip()
     if s.isdigit():
-        return RECEIPT_TYPE_MAP.get(int(s), "Regular")
+        return RECEIPT_TYPE_MAP.get(int(s))
     norm = s.lower().replace(" ", "").replace("_", "")
-    return RECEIPT_TYPE_MAP.get(norm, "Regular")
+    return RECEIPT_TYPE_MAP.get(norm)
 
 
 # -----------------------------------------------------------------------------
@@ -408,7 +398,7 @@ def extract_receipt_fields(doc: Dict[str, Any]) -> Tuple:
     customer = as_json(doc.get("Customer") if isinstance(doc.get("Customer"), dict) else {}, default_val={})
     order_items = as_json(doc.get("OrderItems") if isinstance(doc.get("OrderItems"), list) else [], default_val=[])
 
-    total_amount = clean_decimal(doc.get("TotalAmount"), default=Decimal("0.00"))
+    total_amount = clean_decimal(doc.get("TotalAmount"))
     received_by = clean_str(doc.get("ReceivedBy"), 150)
     payment_mode = map_payment_mode(doc.get("PaymentMode"))
 
@@ -419,7 +409,7 @@ def extract_receipt_fields(doc: Dict[str, Any]) -> Tuple:
     receipt_type = map_receipt_type(doc.get("ReceiptType"))
     revenue_sharing_enabled = clean_bool(doc.get("RevenueSharingEnabled"), default=False)
     # In .NET ct.gr Receipt.cs: public int RevenueShare { get; set; }
-    revenue_share = clean_int(doc.get("RevenueShare")) or 0
+    revenue_share = clean_int(doc.get("RevenueShare"))
 
     meta = as_json(doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {}, default_val={})
     html = clean_str(doc.get("HTML"))
@@ -478,28 +468,24 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
                 CREATE TYPE receipt_payment_mode_enum AS ENUM (
                     'Cash',
                     'Cheque',
-                    'DemandDraft',
-                    'NetBanking',
-                    'UPI',
-                    'Other',
-                    'Unknown'
+                    'DD',
+                    'Netbanking',
+                    'UPI'
                 );
             END IF;
 
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'receipt_status_enum') THEN
                 CREATE TYPE receipt_status_enum AS ENUM (
                     'Active',
-                    'Cancelled',
-                    'Disabled',
-                    'Unknown'
+                    'Cancelled'
                 );
             END IF;
 
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'receipt_type_enum') THEN
                 CREATE TYPE receipt_type_enum AS ENUM (
+                    'Unknown',
                     'Regular',
-                    'Donation',
-                    'Unknown'
+                    'Donation'
                 );
             END IF;
         END $$;
@@ -514,12 +500,12 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             order_items JSONB DEFAULT '[]'::jsonb,
             total_amount NUMERIC(18, 2),
             received_by VARCHAR(150),
-            payment_mode receipt_payment_mode_enum NOT NULL DEFAULT 'Cash',
+            payment_mode receipt_payment_mode_enum,
             financial_instrument JSONB,
-            status receipt_status_enum NOT NULL DEFAULT 'Active',
-            receipt_type receipt_type_enum NOT NULL DEFAULT 'Regular',
+            status receipt_status_enum,
+            receipt_type receipt_type_enum,
             revenue_sharing_enabled BOOLEAN DEFAULT FALSE,
-            revenue_share INTEGER DEFAULT 0,
+            revenue_share INTEGER,
             meta JSONB DEFAULT '{}'::jsonb,
             html TEXT,
             ref_no VARCHAR(100),
@@ -531,10 +517,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        ALTER TABLE receipts ADD COLUMN IF NOT EXISTS ref_no VARCHAR(100);
 
-        -- Backward-compatibility view for singular 'receipt'
-        CREATE OR REPLACE VIEW receipt AS SELECT * FROM receipts;
         """
     )
 

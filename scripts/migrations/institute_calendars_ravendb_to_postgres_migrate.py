@@ -277,6 +277,32 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
+CALENDAR_EVENT_CATEGORY_MAP: Dict[Any, str] = {
+    10: "Event",
+    20: "Holiday",
+    30: "WeeklyHoliday",
+    40: "Exam",
+    "event": "Event",
+    "holiday": "Holiday",
+    "weeklyholiday": "WeeklyHoliday",
+    "exam": "Exam",
+}
+
+
+def map_calendar_event_category(val: Any) -> Optional[str]:
+    """Map category string/int to calendar_event_category_enum preserving None."""
+    if val is None:
+        return None
+    if isinstance(val, int):
+        return CALENDAR_EVENT_CATEGORY_MAP.get(val, None)
+    s = str(val).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return CALENDAR_EVENT_CATEGORY_MAP.get(int(s), None)
+    return CALENDAR_EVENT_CATEGORY_MAP.get(s.lower(), s if s in ("Event", "Holiday", "WeeklyHoliday", "Exam") else None)
+
+
 # -----------------------------------------------------------------------------
 # Document Field Extractor (Only RavenDB fields, no metadata columns)
 # -----------------------------------------------------------------------------
@@ -316,8 +342,8 @@ def extract_institute_calendar_fields(doc: Dict[str, Any]) -> Tuple:
 
     inst_id = clean_uuid(doc.get("InstId"))
     event_name = clean_str(doc.get("EventName"), 255)
-    event_category = clean_str(doc.get("EventCategory"), 100)
-    event_category_as_string = clean_str(doc.get("EventCategoryAsString"), 100)
+    event_category = map_calendar_event_category(doc.get("EventCategory"))
+    event_category_as_string = clean_str(doc.get("EventCategoryAsString"), 100) or event_category
     priority = clean_int(doc.get("Priority"), default=0)
 
     # Audience and ConductedBy are List<string> in C# InstituteCalendar, stored as nullable TEXT[]
@@ -367,11 +393,23 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     """Create target institute_calendars table without secondary indexes or views."""
     cur.execute(
         """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'calendar_event_category_enum') THEN
+                CREATE TYPE calendar_event_category_enum AS ENUM (
+                    'Event',
+                    'Holiday',
+                    'WeeklyHoliday',
+                    'Exam'
+                );
+            END IF;
+        END $$;
+
         CREATE TABLE IF NOT EXISTS institute_calendars (
             id UUID PRIMARY KEY,
             inst_id UUID,
             event_name VARCHAR(255),
-            event_category VARCHAR(100),
+            event_category calendar_event_category_enum,
             event_category_as_string VARCHAR(100),
             priority INTEGER DEFAULT 0,
             audience TEXT[],

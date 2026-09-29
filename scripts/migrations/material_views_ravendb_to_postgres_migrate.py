@@ -32,15 +32,20 @@ UUID_RE = re.compile(
 
 UUID_NAMESPACE_MATERIAL_VIEWS = uuid.UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")
 
-MATERIAL_STATUSES = {
+# MaterialStatusEnum: Active=1, Reserved=5, Issued=10, UnderMaintenance=20, OutOfCirculation=90, Disabled=99
+MATERIAL_STATUSES: Dict[Any, str] = {
+    1: "Active",
+    5: "Reserved",
+    10: "Issued",
+    20: "UnderMaintenance",
+    90: "OutOfCirculation",
+    99: "Disabled",
     "active": "Active",
+    "reserved": "Reserved",
     "issued": "Issued",
     "undermaintenance": "UnderMaintenance",
-    "under_maintenance": "UnderMaintenance",
-    "under maintenance": "UnderMaintenance",
+    "outofcirculation": "OutOfCirculation",
     "disabled": "Disabled",
-    "archived": "Archived",
-    "unknown": "Unknown",
 }
 
 
@@ -296,12 +301,17 @@ def clean_string_list(raw_val: Any) -> List[str]:
     return [str(raw_val)]
 
 
-def map_material_status(raw_val: Any) -> str:
+def map_material_status(raw_val: Any) -> Optional[str]:
     """Map string status to material_status_enum."""
     if raw_val is None:
-        return "Active"
-    norm = str(raw_val).strip().lower()
-    return MATERIAL_STATUSES.get(norm, "Active")
+        return None
+    if isinstance(raw_val, int):
+        return MATERIAL_STATUSES.get(raw_val)
+    s = str(raw_val).strip()
+    if s.isdigit():
+        return MATERIAL_STATUSES.get(int(s))
+    norm = s.lower().replace(" ", "").replace("_", "")
+    return MATERIAL_STATUSES.get(norm)
 
 
 def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
@@ -352,10 +362,10 @@ def extract_material_view_fields(doc: Dict[str, Any]) -> Tuple:
         attributes = as_json(raw_attrs, default_val={})
 
     tags = clean_string_list(doc.get("Tags"))
-    value = clean_decimal(doc.get("Value"), default=Decimal("0.00"))
+    value = clean_decimal(doc.get("Value"))
     status = map_material_status(doc.get("Status"))
     last_verified_on = clean_epoch_ms(doc.get("LastVerifiedOn"))
-    pages = clean_int(doc.get("Pages"), default=0)
+    pages = clean_int(doc.get("Pages"))
 
     return (
         material_view_id,
@@ -389,12 +399,12 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'material_status_enum') THEN
                 CREATE TYPE material_status_enum AS ENUM (
-                    'Unknown',
                     'Active',
+                    'Reserved',
                     'Issued',
                     'UnderMaintenance',
-                    'Disabled',
-                    'Archived'
+                    'OutOfCirculation',
+                    'Disabled'
                 );
             END IF;
         END $$;
@@ -411,10 +421,10 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             location VARCHAR(255),
             attributes JSONB DEFAULT '{}'::jsonb,
             tags TEXT[] DEFAULT '{}'::text[],
-            value NUMERIC(18, 2) DEFAULT 0.00,
-            status material_status_enum NOT NULL DEFAULT 'Active',
+            value NUMERIC(18, 2),
+            status material_status_enum,
             last_verified_on BIGINT,
-            pages INTEGER DEFAULT 0
+            pages INTEGER
         );
         """
     )

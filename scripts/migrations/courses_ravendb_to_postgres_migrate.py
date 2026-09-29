@@ -51,7 +51,6 @@ class Config:
     timeout_sec: int
     summary_json_path: Optional[str]
     write_summary_json: bool
-    include_api_payload_validation: bool
     inspect_source_only: bool
 
 
@@ -136,11 +135,6 @@ def parse_args() -> Config:
         help="Disable writing post-run summary JSON artifact.",
     )
     parser.add_argument(
-        "--no-api-payload-validation",
-        action="store_true",
-        help="Disable API-shaped PostgreSQL payload generation in summary JSON.",
-    )
-    parser.add_argument(
         "--inspect-source-only",
         action="store_true",
         help="Fetch RavenDB Courses and print source shape/counts without writing PostgreSQL.",
@@ -212,7 +206,6 @@ def parse_args() -> Config:
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
         write_summary_json=not args.no_summary_json,
-        include_api_payload_validation=not args.no_api_payload_validation,
         inspect_source_only=args.inspect_source_only,
     )
 
@@ -317,6 +310,11 @@ def edu_level_code(value: Any) -> int:
 
 
 def parse_edu_level(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
     valid_names = (
         "Unknown",
         "PreNursery",
@@ -326,8 +324,8 @@ def parse_edu_level(value: Any) -> Optional[str]:
         "Graduate",
         "PostGraduate",
     )
-    if value in valid_names:
-        return str(value)
+    if val_str in valid_names:
+        return val_str
     try:
         return {
             -1: "Unknown",
@@ -337,31 +335,23 @@ def parse_edu_level(value: Any) -> Optional[str]:
             20: "UnderGraduate",
             30: "Graduate",
             40: "PostGraduate",
-        }.get(int(value), None)
+        }.get(int(val_str), None)
     except (TypeError, ValueError):
         return None
 
 
-def course_status_code(value: Any) -> int:
-    mapping = {"Unknown": 0, "Active": 1, "Disabled": 99}
-    if value in mapping:
-        return mapping[value]
+def parse_course_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    if val_str in ("Unknown", "Active", "Disabled"):
+        return val_str
     try:
-        val_int = int(value)
-        if val_int in mapping.values():
-            return val_int
+        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(val_str), None)
     except (TypeError, ValueError):
-        pass
-    return 0
-
-
-def parse_course_status(value: Any) -> str:
-    if value in ("Unknown", "Active", "Disabled"):
-        return str(value)
-    try:
-        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(value), "Active")
-    except (TypeError, ValueError):
-        return "Active"
+        return None
 
 
 def as_text(value: Any) -> Optional[str]:
@@ -380,171 +370,6 @@ def as_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
 
 
-def iso_utc(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return (
-            value.astimezone(timezone.utc)
-            .replace(tzinfo=None)
-            .isoformat(timespec="microseconds")
-            .rstrip("0")
-            .rstrip(".")
-            + "Z"
-        )
-    return str(value)
-
-
-def edu_level_code(value: Any) -> int:
-    if value is None:
-        return 0
-    text = str(value).strip()
-    if not text:
-        return 0
-    parsed = parse_int(text)
-    if parsed is not None:
-        return parsed
-
-    mapping = {
-        "school": 10,
-        "undergraduate": 20,
-        "graduate": 30,
-        "postgraduate": 30,
-        "doctorate": 40,
-    }
-    return mapping.get(text.lower(), 0)
-
-
-def course_status_code(value: Any) -> int:
-    if value is None:
-        return 0
-    text = str(value).strip()
-    if not text:
-        return 0
-    parsed = parse_int(text)
-    if parsed is not None:
-        return parsed
-
-    mapping = {
-        "active": 1,
-        "inactive": 0,
-        "archived": 2,
-        "deleted": 9,
-    }
-    return mapping.get(text.lower(), 0)
-
-
-def to_camel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
-    status_text = first_non_empty(row.get("status_as_string"), row.get("status"))
-    edu_level_text = first_non_empty(
-        row.get("edu_level_as_string"), row.get("edu_level")
-    )
-
-    return {
-        "name": row.get("name"),
-        "branch": row.get("branch"),
-        "nameAndBranch": row.get("name_and_branch"),
-        "eduLevel": edu_level_code(row.get("edu_level")),
-        "eduLevelAsString": edu_level_text,
-        "instId": row.get("inst_id"),
-        "affiliation": row.get("affiliation"),
-        "status": course_status_code(status_text),
-        "statusAsString": status_text,
-        "terms": as_list(row.get("terms")),
-        "examSubjectOrder": as_list(row.get("exam_subject_order")),
-        "sortIndex": row.get("sort_index"),
-        "rank": row.get("rank"),
-        "seatsAvailable": row.get("seats_available"),
-        "program": row.get("program"),
-        "id": row.get("id"),
-        "ownerId": row.get("owner_id"),
-        "parentId": row.get("parent_id") or "",
-        "createdOn": iso_utc(row.get("created_on")),
-        "createdBy": row.get("created_by"),
-        "modifiedOn": iso_utc(row.get("modified_on")),
-        "modifiedBy": row.get("modified_by"),
-    }
-
-
-def build_courses_list_payload(
-    cur: psycopg2.extensions.cursor, params: Dict[str, Any]
-) -> Dict[str, Any]:
-    top = int(params.get("recordsPerPage") or 256)
-    current_page = int(params.get("currentPage") or 0)
-    offset = current_page * top
-
-    cur.execute("SELECT COUNT(*) FROM course")
-    total_records = int(cur.fetchone()[0])
-
-    cur.execute(
-        """
-        SELECT
-            id::text AS id,
-            name,
-            branch,
-            name_and_branch,
-            edu_level,
-            edu_level_as_string,
-            inst_id::text AS inst_id,
-            affiliation,
-            status,
-            status_as_string,
-            COALESCE(terms, '[]'::jsonb) AS terms,
-            COALESCE(exam_subject_order, ARRAY[]::text[]) AS exam_subject_order,
-            sort_index,
-            rank,
-            seats_available,
-            program,
-            owner_id::text AS owner_id,
-            parent_id::text AS parent_id,
-            created_on,
-            created_by::text AS created_by,
-            modified_on,
-            modified_by::text AS modified_by
-        FROM course
-        ORDER BY name NULLS LAST, branch NULLS LAST, id
-        LIMIT %s OFFSET %s
-        """,
-        (top, offset),
-    )
-    columns = [desc[0] for desc in cur.description]
-    rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-
-    data = [to_camel_dict(row) for row in rows]
-    total_pages = (total_records + top - 1) // top if top > 0 else 0
-
-    return {
-        "data": data,
-        "meta": None,
-        "createdOn": iso_utc(datetime.now(timezone.utc)),
-        "requestUrl": None,
-        "requestVerb": None,
-        "pagedResults": False,
-        "currentPage": current_page,
-        "recordsPerPage": top,
-        "totalRecords": total_records,
-        "totalPages": total_pages,
-    }
-
-
-def build_api_payload_validation(
-    cur: psycopg2.extensions.cursor,
-) -> Dict[str, Any]:
-    list_params = {
-        "currentPage": 0,
-        "recordsPerPage": 256,
-    }
-    return {
-        "reference": {
-            "note": "PostgreSQL-derived API-shaped payloads for course read parity validation.",
-        },
-        "endpoints": {
-            "coursesList": {
-                "request": list_params,
-                "response": build_courses_list_payload(cur, list_params),
-            }
-        },
-    }
 
 
 def raven_query_collection(
@@ -766,9 +591,6 @@ def upsert_course(
     if not course_id:
         return None
 
-    cur.execute("SELECT 1 FROM course WHERE id = %s", (course_id,))
-    is_new = cur.fetchone() is None
-
     cur.execute(
         """
         INSERT INTO course (
@@ -822,7 +644,7 @@ def upsert_course(
             created_by = EXCLUDED.created_by,
             modified_on = EXCLUDED.modified_on,
             modified_by = EXCLUDED.modified_by
-        RETURNING id;
+        RETURNING (xmax = 0);
         """,
         (
             course_id,
@@ -853,7 +675,7 @@ def upsert_course(
     row = cur.fetchone()
     if not row:
         return None
-    return UpsertResult(str(row[0]), is_new)
+    return UpsertResult(course_id, bool(row[0]))
 
 
 def build_source_profile(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -960,39 +782,9 @@ def main() -> int:
                     courses_processed += 1
                     courses_inserted += int(result.inserted)
 
-        api_payload_validation: Optional[Dict[str, Any]] = None
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM course")
             course_count = int(cur.fetchone()[0])
-            if cfg.include_api_payload_validation:
-                api_payload_validation = build_api_payload_validation(cur)
-
-        summary = {
-            "generated_at_utc": datetime.now(timezone.utc)
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z"),
-            "source": {
-                "raven_url": cfg.raven_url,
-                "raven_db": cfg.raven_db,
-                "courses_collection": cfg.courses_collection,
-            },
-            "target": {
-                "pg_host": cfg.pg_host,
-                "pg_port": cfg.pg_port,
-                "pg_db": cfg.pg_db,
-                "pg_user": cfg.pg_user,
-            },
-            "run_stats": {
-                "courses_processed": courses_processed,
-                "new_courses_inserted": courses_inserted,
-                "skipped_courses_missing_id": skipped_courses_missing_id,
-            },
-            "post_load_counts": {
-                "course": course_count,
-            },
-        }
-        if api_payload_validation is not None:
-            summary["api_payload_validation"] = api_payload_validation
 
         print("Migration completed.")
         print(f"courses_processed: {courses_processed}")
@@ -1003,6 +795,12 @@ def main() -> int:
             if not output_path:
                 timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 output_path = f"validation/courses-migration-summary-{timestamp}.json"
+            summary = {
+                "courses_processed": courses_processed,
+                "new_courses_inserted": courses_inserted,
+                "skipped_courses_missing_id": skipped_courses_missing_id,
+                "course_count": course_count,
+            }
             written = write_summary_json(output_path, summary)
             print(f"Summary JSON written: {written}")
 

@@ -5,7 +5,7 @@ transform it to PostgreSQL schema with native PostgreSQL ENUMs and JSONBs,
 and load into PostgreSQL.
 
 Target table:
-- staff (with backward-compatible view: staffs)
+- staffs
 """
 
 from __future__ import annotations
@@ -281,46 +281,32 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 # Enum Mappings (Exact match to C# Enums)
 # -----------------------------------------------------------------------------
 
+# StaffStatusEnum: Unknown = -1, Active = 1, Disabled = 99
 STAFF_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
+    -1: "Unknown",
     1: "Active",
     99: "Disabled",
+    "-1": "Unknown",
+    "1": "Active",
+    "99": "Disabled",
     "unknown": "Unknown",
     "active": "Active",
     "disabled": "Disabled",
-    "inactive": "Disabled",
 }
 
-STAFF_GENDER_MAP: Dict[str, str] = {
+# GenderEnum: Female = 0, Male = 1, NoInfo = 90
+STAFF_GENDER_MAP: Dict[Any, str] = {
+    0: "Female",
+    1: "Male",
+    90: "NoInfo",
+    "0": "Female",
+    "1": "Male",
+    "90": "NoInfo",
     "female": "Female",
-    "f": "Female",
     "male": "Male",
-    "m": "Male",
-    "other": "Other",
     "noinfo": "NoInfo",
-    "unknown": "NoInfo",
 }
 
-
-STAFF_TYPE_MAP: Dict[Any, str] = {
-    0: "Teaching",
-    1: "NonTeaching",
-    2: "Management",
-    "teaching": "Teaching",
-    "nonteaching": "NonTeaching",
-    "management": "Management",
-}
-
-
-def map_staff_type(val: Any) -> Optional[str]:
-    if val is None:
-        return None
-    if isinstance(val, int):
-        return STAFF_TYPE_MAP.get(val, None)
-    s = str(val).strip()
-    if s.isdigit():
-        return STAFF_TYPE_MAP.get(int(s), None)
-    return STAFF_TYPE_MAP.get(s.lower(), s if s in ("Teaching", "NonTeaching", "Management") else None)
 
 
 def map_staff_status(val: Any) -> str:
@@ -334,11 +320,17 @@ def map_staff_status(val: Any) -> str:
     return STAFF_STATUS_MAP.get(s.lower(), "Active")
 
 
-def map_staff_gender(val: Any) -> str:
-    if val is None:
-        return "NoInfo"
-    s = str(val).strip().lower()
-    return STAFF_GENDER_MAP.get(s, "NoInfo")
+def map_staff_gender(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
+    if isinstance(val, int):
+        return STAFF_GENDER_MAP.get(val, None)
+    s = str(val).strip()
+    if not s or s.lower() in {"null", "none"}:
+        return None
+    if s.isdigit():
+        return STAFF_GENDER_MAP.get(int(s), None)
+    return STAFF_GENDER_MAP.get(s.lower(), None)
 
 
 # -----------------------------------------------------------------------------
@@ -391,7 +383,6 @@ def extract_staff_fields(doc: Dict[str, Any]) -> Tuple:
     created_by = clean_uuid(doc.get("CreatedBy"))
     modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
     modified_by = clean_uuid(doc.get("ModifiedBy"))
-    staff_type = map_staff_type(doc.get("StaffType"))
 
     return (
         staff_id,
@@ -427,7 +418,6 @@ def extract_staff_fields(doc: Dict[str, Any]) -> Tuple:
         created_by,
         modified_on,
         modified_by,
-        staff_type,
     )
 
 
@@ -437,7 +427,7 @@ def extract_staff_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and staff table without secondary indexes."""
+    """Create target enums and staffs table without secondary indexes."""
     cur.execute(
         """
         -- 1. Create Enums
@@ -447,15 +437,8 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
                 CREATE TYPE staff_gender_enum AS ENUM (
                     'Female',
                     'Male',
-                    'Other',
                     'NoInfo'
                 );
-            ELSE
-                BEGIN
-                    ALTER TYPE staff_gender_enum ADD VALUE IF NOT EXISTS 'Other';
-                EXCEPTION WHEN OTHERS THEN
-                    NULL;
-                END;
             END IF;
 
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'staff_status_enum') THEN
@@ -468,7 +451,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         END $$;
 
         -- 2. Create Target Table (No secondary indexes)
-        CREATE TABLE IF NOT EXISTS staff (
+        CREATE TABLE IF NOT EXISTS staffs (
             id UUID PRIMARY KEY,
             inst_id UUID,
             doj TIMESTAMPTZ,
@@ -487,7 +470,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             last_name VARCHAR(150),
             name VARCHAR(250),
             title VARCHAR(50),
-            gender staff_gender_enum NOT NULL DEFAULT 'NoInfo',
+            gender staff_gender_enum,
             dob TIMESTAMPTZ,
             email VARCHAR(255),
             mobile VARCHAR(50),
@@ -501,14 +484,8 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             created_on TIMESTAMPTZ NOT NULL,
             created_by UUID,
             modified_on TIMESTAMPTZ,
-            modified_by UUID,
-            staff_type VARCHAR(50)
+            modified_by UUID
         );
-
-        ALTER TABLE staff ADD COLUMN IF NOT EXISTS staff_type VARCHAR(50);
-
-        -- Backward-compatibility view for plural 'staffs' query
-        CREATE OR REPLACE VIEW staffs AS SELECT * FROM staff;
         """
     )
 
@@ -522,15 +499,14 @@ def upsert_staff(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> Upsert
     """Idempotently upsert a Staff document."""
     fields = extract_staff_fields(doc)
     sql = """
-        INSERT INTO staff (
+        INSERT INTO staffs (
             id, inst_id, doj, designations, status,
             employment_history, course_subject_list, alias, class_teacher,
             ref_id, user_id, salaries, payslips,
             first_name, middle_name, last_name, name, title, gender,
             dob, email, mobile, virtual_id,
             contacts, addresses, tags, attributes,
-            owner_id, parent_id, created_on, created_by, modified_on, modified_by,
-            staff_type
+            owner_id, parent_id, created_on, created_by, modified_on, modified_by
         ) VALUES (
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s,
@@ -538,8 +514,7 @@ def upsert_staff(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> Upsert
             %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s,
             %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s,
-            %s
+            %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
             inst_id = EXCLUDED.inst_id,
@@ -573,8 +548,7 @@ def upsert_staff(cur: psycopg2.extensions.cursor, doc: Dict[str, Any]) -> Upsert
             created_on = EXCLUDED.created_on,
             created_by = EXCLUDED.created_by,
             modified_on = EXCLUDED.modified_on,
-            modified_by = EXCLUDED.modified_by,
-            staff_type = EXCLUDED.staff_type
+            modified_by = EXCLUDED.modified_by
         RETURNING (xmax = 0);
     """
     cur.execute(sql, fields)
@@ -694,8 +668,10 @@ def main() -> int:
             password=cfg.pg_password,
         )
         conn.autocommit = True
-        with conn.cursor() as tz_cur:
-            tz_cur.execute("SET TIME ZONE 'UTC';")
+        with conn.cursor() as cur:
+            cur.execute("SET TIME ZONE 'UTC';")
+            print("[3/4] Ensuring target schema...")
+            ensure_target_schema(cur)
         conn.autocommit = False
 
         loaded_staffs = 0
@@ -703,9 +679,6 @@ def main() -> int:
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/4] Ensuring target schema...")
-                ensure_target_schema(cur)
-
                 print("[4/4] Upserting staffs...")
                 for d in staff_docs:
                     res = upsert_staff(cur, d)

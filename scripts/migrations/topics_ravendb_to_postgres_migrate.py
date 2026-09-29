@@ -293,20 +293,19 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 ROLE_MAP: Dict[Any, str] = {
     10: "Admin",
     20: "Member",
+    "10": "Admin",
+    "20": "Member",
     "admin": "Admin",
-    "administrator": "Admin",
     "member": "Member",
-    "user": "Member",
 }
 
 # CategoryEnum: PrivateToInstitue = 30, Public = 40
 CATEGORY_MAP: Dict[Any, str] = {
     30: "PrivateToInstitue",
     40: "Public",
+    "30": "PrivateToInstitue",
+    "40": "Public",
     "privatetoinstitue": "PrivateToInstitue",
-    "privatetoinstitute": "PrivateToInstitue",
-    "private_to_institute": "PrivateToInstitue",
-    "private": "PrivateToInstitue",
     "public": "Public",
 }
 
@@ -314,9 +313,10 @@ CATEGORY_MAP: Dict[Any, str] = {
 ACCESS_MAP: Dict[Any, str] = {
     50: "Open",
     60: "Restricted",
+    "50": "Open",
+    "60": "Restricted",
     "open": "Open",
     "restricted": "Restricted",
-    "private": "Restricted",
 }
 
 # TopicStatusEnum: Unknown = 0, Active = 1, Disabled = 99
@@ -324,10 +324,12 @@ TOPIC_STATUS_MAP: Dict[Any, str] = {
     0: "Unknown",
     1: "Active",
     99: "Disabled",
+    "0": "Unknown",
+    "1": "Active",
+    "99": "Disabled",
     "unknown": "Unknown",
     "active": "Active",
     "disabled": "Disabled",
-    "inactive": "Disabled",
 }
 
 
@@ -485,20 +487,12 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             END IF;
         END $$;
 
-        -- Drop legacy views if they exist to prevent table/view name collisions
-        DO $$
-        BEGIN
-            IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'topics') THEN
-                DROP VIEW topics CASCADE;
-            END IF;
-        END $$;
-
         -- 2. Create Target Table (No secondary indexes)
         CREATE TABLE IF NOT EXISTS topics (
             id UUID PRIMARY KEY,
             main_topic_id UUID,
-            name VARCHAR(150),
-            friendly_name VARCHAR(150),
+            name VARCHAR(255),
+            friendly_name VARCHAR(255),
             description TEXT,
             role topic_role_enum NOT NULL DEFAULT 'Admin',
             category topic_category_enum NOT NULL DEFAULT 'PrivateToInstitue',
@@ -510,7 +504,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             can_unsubscribe BOOLEAN DEFAULT FALSE,
             can_publish BOOLEAN DEFAULT FALSE,
             is_subscription_allowed BOOLEAN DEFAULT FALSE,
-            handle VARCHAR(150),
+            handle VARCHAR(255),
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,
@@ -519,8 +513,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        -- Backward-compatibility view for singular 'topic' query
-        CREATE OR REPLACE VIEW topic AS SELECT * FROM topics;
         """
     )
 
@@ -686,8 +678,10 @@ def main() -> int:
             password=cfg.pg_password,
         )
         conn.autocommit = True
-        with conn.cursor() as tz_cur:
-            tz_cur.execute("SET TIME ZONE 'UTC';")
+        with conn.cursor() as cur:
+            cur.execute("SET TIME ZONE 'UTC';")
+            print("[3/4] Ensuring target schema...")
+            ensure_target_schema(cur)
         conn.autocommit = False
 
         loaded_topics = 0
@@ -695,9 +689,6 @@ def main() -> int:
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/4] Ensuring target schema...")
-                ensure_target_schema(cur)
-
                 print("[4/4] Upserting topics...")
                 for d in topic_docs:
                     res = upsert_topic(cur, d)

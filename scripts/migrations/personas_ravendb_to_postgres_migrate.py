@@ -332,158 +332,56 @@ def as_string_list(value: Any) -> Optional[List[str]]:
     return [str(value)]
 
 
-def persona_type_code(value: Any) -> int:
-    mapping = {
-        "Anon": 10,
-        "Management": 20,
-        "Parent": 30,
-        "Staff": 40,
-        "Student": 50,
-        "External": 80,
-        "Dev": 90,
-    }
-    if value in mapping:
-        return mapping[value]
-    try:
-        val_int = int(value)
-        if val_int in mapping.values():
-            return val_int
-    except (TypeError, ValueError):
-        pass
-    return 10
-
-
-def persona_status_code(value: Any) -> int:
-    mapping = {"Unknown": -1, "Active": 1, "Disabled": 99}
-    if value in mapping:
-        return mapping[value]
-    try:
-        val_int = int(value)
-        if val_int in mapping.values():
-            return val_int
-    except (TypeError, ValueError):
-        pass
-    return -1
-
-
 def parse_persona_type(value: Any) -> Optional[str]:
-    valid_names = ("Anon", "Management", "Parent", "Staff", "Student", "External", "Dev")
-    if value in valid_names:
-        return str(value)
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    valid_names = (
+        "0",
+        "Anon",
+        "Management",
+        "Parent",
+        "Staff",
+        "Student",
+        "External",
+        "Dev",
+        "35",
+        "60",
+        "70",
+    )
+    if val_str in valid_names:
+        return val_str
     try:
-        return {
+        val_int = int(val_str)
+        named = {
+            0: "0",
             10: "Anon",
             20: "Management",
             30: "Parent",
+            35: "35",
             40: "Staff",
             50: "Student",
+            60: "60",
+            70: "70",
             80: "External",
             90: "Dev",
-        }.get(int(value), None)
+        }.get(val_int)
+        return named if named is not None else str(val_int)
     except (TypeError, ValueError):
+        return val_str
+
+
+def parse_persona_status(value: Any) -> Optional[str]:
+    if value is None:
         return None
-
-
-def parse_persona_status(value: Any) -> str:
     if value in ("Unknown", "Active", "Disabled"):
         return str(value)
     try:
-        return {-1: "Unknown", 1: "Active", 99: "Disabled"}.get(int(value), "Active")
+        return {-1: "Unknown", 1: "Active", 99: "Disabled"}.get(int(value), None)
     except (TypeError, ValueError):
-        return "Active"
-
-
-def to_camel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "id": row.get("id"),
-        "title": row.get("title"),
-        "displayText": row.get("display_text"),
-        "personaType": row.get("persona_type"),
-        "personaTypeAsString": row.get("persona_type_as_string"),
-        "scope": as_list(row.get("scope")),
-        "namedScope": as_list(row.get("named_scope")),
-        "status": row.get("status"),
-        "ownerId": row.get("owner_id"),
-        "parentId": row.get("parent_id"),
-        "createdOn": iso_utc(row.get("created_on")),
-        "createdBy": row.get("created_by"),
-        "modifiedOn": iso_utc(row.get("modified_on")),
-        "modifiedBy": row.get("modified_by"),
-    }
-
-
-def build_personas_list_payload(
-    cur: psycopg2.extensions.cursor, params: Dict[str, Any]
-) -> Dict[str, Any]:
-    top = int(params.get("recordsPerPage") or 256)
-    current_page = int(params.get("currentPage") or 0)
-    offset = current_page * top
-
-    cur.execute("SELECT COUNT(*) FROM persona")
-    total_records = int(cur.fetchone()[0])
-
-    cur.execute(
-        """
-        SELECT
-            id::text AS id,
-            title,
-            display_text,
-            persona_type,
-            persona_type_as_string,
-            COALESCE(scope, '{}'::text[]) AS scope,
-            COALESCE(named_scope, '{}'::text[]) AS named_scope,
-            status,
-            owner_id::text AS owner_id,
-            parent_id::text AS parent_id,
-            created_on,
-            created_by::text AS created_by,
-            modified_on,
-            modified_by::text AS modified_by
-        FROM persona
-        ORDER BY created_on DESC NULLS LAST, title NULLS LAST, id
-        LIMIT %s OFFSET %s
-        """,
-        (top, offset),
-    )
-
-    columns = [desc[0] for desc in cur.description]
-    rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-
-    data = [to_camel_dict(row) for row in rows]
-    total_pages = (total_records + top - 1) // top if top > 0 else 0
-
-    return {
-        "data": data,
-        "meta": None,
-        "createdOn": iso_utc(datetime.now(timezone.utc)),
-        "requestUrl": None,
-        "requestVerb": None,
-        "pagedResults": False,
-        "currentPage": current_page,
-        "recordsPerPage": top,
-        "totalRecords": total_records,
-        "totalPages": total_pages,
-    }
-
-
-def build_api_payload_validation(
-    cur: psycopg2.extensions.cursor,
-) -> Dict[str, Any]:
-    list_params = {
-        "currentPage": 0,
-        "recordsPerPage": 256,
-    }
-    return {
-        "reference": {
-            "note": "PostgreSQL-derived API-shaped payloads for persona read parity validation.",
-        },
-        "endpoints": {
-            "personasList": {
-                "request": list_params,
-                "response": build_personas_list_payload(cur, list_params),
-            }
-        },
-    }
+        return None
 
 
 def raven_query_collection(
@@ -561,13 +459,17 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'persona_type_enum') THEN
                 CREATE TYPE persona_type_enum AS ENUM (
+                    '0',
                     'Anon',
                     'Management',
                     'Parent',
                     'Staff',
                     'Student',
                     'External',
-                    'Dev'
+                    'Dev',
+                    '35',
+                    '60',
+                    '70'
                 );
             END IF;
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'persona_status_enum') THEN
@@ -680,9 +582,6 @@ def upsert_persona(
     if not persona_id:
         return None
 
-    cur.execute("SELECT 1 FROM persona WHERE id = %s", (persona_id,))
-    is_new = cur.fetchone() is None
-
     cur.execute(
         """
         INSERT INTO persona (
@@ -720,7 +619,7 @@ def upsert_persona(
             created_by = EXCLUDED.created_by,
             modified_on = EXCLUDED.modified_on,
             modified_by = EXCLUDED.modified_by
-        RETURNING id;
+        RETURNING (xmax = 0);
         """,
         (
             persona_id,
@@ -747,7 +646,7 @@ def upsert_persona(
     row = cur.fetchone()
     if not row:
         return None
-    return UpsertResult(str(row[0]), is_new)
+    return UpsertResult(persona_id, bool(row[0]))
 
 
 def build_source_profile(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -834,13 +733,6 @@ def main() -> int:
                     personas_processed += 1
                     personas_inserted += int(result.inserted)
 
-        api_payload_validation: Optional[Dict[str, Any]] = None
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM persona")
-            persona_count = int(cur.fetchone()[0])
-            if cfg.include_api_payload_validation:
-                api_payload_validation = build_api_payload_validation(cur)
-
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
@@ -861,12 +753,7 @@ def main() -> int:
                 "new_personas_inserted": personas_inserted,
                 "skipped_personas_missing_id": skipped_personas_missing_id,
             },
-            "post_load_counts": {
-                "persona": persona_count,
-            },
         }
-        if api_payload_validation is not None:
-            summary["api_payload_validation"] = api_payload_validation
 
         print("Migration completed.")
         print(f"personas_processed: {personas_processed}")

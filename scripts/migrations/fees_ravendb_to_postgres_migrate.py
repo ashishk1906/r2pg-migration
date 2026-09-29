@@ -51,7 +51,6 @@ class Config:
     timeout_sec: int
     summary_json_path: Optional[str]
     write_summary_json: bool
-    include_api_payload_validation: bool = True
 
 
 @dataclass
@@ -140,12 +139,6 @@ def parse_args() -> Config:
         action="store_true",
         help="Disable writing post-run summary JSON artifact.",
     )
-    parser.add_argument(
-        "--include-api-payload-validation",
-        action="store_true",
-        default=True,
-        help="Include API-shaped payload validation in summary output.",
-    )
 
     args = parser.parse_args()
 
@@ -217,7 +210,6 @@ def parse_args() -> Config:
         timeout_sec=args.timeout_sec,
         summary_json_path=args.summary_json_path,
         write_summary_json=not args.no_summary_json,
-        include_api_payload_validation=args.include_api_payload_validation,
     )
 
 
@@ -300,30 +292,6 @@ def parse_int(value: Any) -> Optional[int]:
         return None
 
 
-def fee_status_code(value: Any) -> int:
-    mapping = {"Unknown": 0, "Active": 1, "Disabled": 99}
-    if value in mapping:
-        return mapping[value]
-    try:
-        val_int = int(value)
-        if val_int in mapping.values():
-            return val_int
-    except (TypeError, ValueError):
-        pass
-    return 0
-
-
-def fee_tx_status_code(value: Any) -> int:
-    mapping = {"Active": 1, "Disabled": 99}
-    if value in mapping:
-        return mapping[value]
-    try:
-        val_int = int(value)
-        if val_int in mapping.values():
-            return val_int
-    except (TypeError, ValueError):
-        pass
-    return 1
 
 
 def parse_decimal(value: Any) -> Optional[Decimal]:
@@ -386,25 +354,35 @@ def iso_utc(value: Any) -> Optional[str]:
     return str(value)
 
 
-def parse_fee_status(value: Any) -> str:
-    if value in ("Unknown", "Active", "Disabled"):
-        return str(value)
+def parse_fee_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    if val_str in ("Unknown", "Active", "Disabled"):
+        return val_str
     try:
-        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(value), "Active")
+        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(val_str), None)
     except (TypeError, ValueError):
-        return "Active"
+        return None
 
 
-def parse_fee_tx_status(value: Any) -> str:
-    if value in ("Active", "Disabled"):
-        return str(value)
+def parse_fee_tx_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    if val_str in ("Active", "Disabled"):
+        return val_str
     try:
-        return {1: "Active", 99: "Disabled"}.get(int(value), "Active")
+        return {1: "Active", 99: "Disabled"}.get(int(val_str), None)
     except (TypeError, ValueError):
-        return "Active"
+        return None
 
 
-def parse_payment_mode(value: Any, default: Optional[str] = "Cash") -> Optional[str]:
+def parse_payment_mode(value: Any, default: Optional[str] = None) -> Optional[str]:
     if value is None:
         return default
     text = str(value).strip()
@@ -425,152 +403,7 @@ def parse_payment_mode(value: Any, default: Optional[str] = "Cash") -> Optional[
     return lookup.get(text.lower(), text)
 
 
-def to_fee_camel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "id": row.get("id"),
-        "name": row.get("name"),
-        "nameLower": row.get("name_lower"),
-        "displayText": row.get("display_text"),
-        "amount": decimal_to_float(row.get("amount")),
-        "tags": as_list(row.get("tags")),
-        "collectStudentWise": row.get("collect_student_wise"),
-        "studentList": as_list(row.get("student_list")),
-        "courseList": as_list(row.get("course_list")),
-        "installments": as_list(row.get("installments")),
-        "fines": as_list(row.get("fines")),
-        "isTxDone": row.get("is_tx_done"),
-        "status": row.get("status"),
-        "ownerId": row.get("owner_id"),
-        "parentId": row.get("parent_id"),
-        "createdOn": iso_utc(row.get("created_on")),
-        "createdBy": row.get("created_by"),
-        "modifiedOn": iso_utc(row.get("modified_on")),
-        "modifiedBy": row.get("modified_by"),
-    }
 
-
-def to_fee_tx_camel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "id": row.get("id"),
-        "txNo": row.get("tx_no"),
-        "txDate": iso_utc(row.get("tx_date")),
-        "studentId": row.get("student_id"),
-        "installmentsPaid": as_list(row.get("installments_paid")),
-        "finesPaid": as_list(row.get("fines_paid")),
-        "discounts": as_list(row.get("discounts")),
-        "feeAdjustment": row.get("fee_adjustment"),
-        "paymentMode": row.get("payment_mode"),
-        "isFinePaid": row.get("is_fine_paid"),
-        "isDiscountGiven": row.get("is_discount_given"),
-        "hasFeeAdjustment": row.get("has_fee_adjustment"),
-        "isOpeningBalanceAdjusted": row.get("is_opening_balance_adjusted"),
-        "refNo": row.get("ref_no"),
-        "amount": decimal_to_float(row.get("amount")),
-        "status": row.get("status"),
-        "paidBy": row.get("paid_by"),
-        "chequeNo": row.get("cheque_no"),
-        "bankName": row.get("bank_name"),
-        "chequeDate": iso_utc(row.get("cheque_date")),
-        "onlineTxnRefNo": row.get("online_txn_ref_no"),
-        "ownerId": row.get("owner_id"),
-        "parentId": row.get("parent_id"),
-        "createdOn": iso_utc(row.get("created_on")),
-        "createdBy": row.get("created_by"),
-        "modifiedOn": iso_utc(row.get("modified_on")),
-        "modifiedBy": row.get("modified_by"),
-    }
-
-
-def build_api_payload_validation(cur: psycopg2.extensions.cursor) -> Dict[str, Any]:
-    cur.execute(
-        """
-        SELECT
-            id::text AS id,
-            name,
-            name_lower,
-            display_text,
-            amount,
-            tags,
-            collect_student_wise,
-            student_list,
-            course_list,
-            installments,
-            fines,
-            is_tx_done,
-            status,
-            owner_id::text AS owner_id,
-            parent_id::text AS parent_id,
-            created_on,
-            created_by::text AS created_by,
-            modified_on,
-            modified_by::text AS modified_by
-        FROM fee
-        ORDER BY name, id
-        LIMIT 20;
-        """
-    )
-    fee_columns = [desc[0] for desc in cur.description]
-    fee_rows = [dict(zip(fee_columns, row)) for row in cur.fetchall()]
-    fees_data = [to_fee_camel_dict(row) for row in fee_rows]
-
-    cur.execute(
-        """
-        SELECT
-            id::text AS id,
-            tx_no,
-            tx_date,
-            student_id::text AS student_id,
-            installments_paid,
-            fines_paid,
-            discounts,
-            fee_adjustment,
-            payment_mode,
-            is_fine_paid,
-            is_discount_given,
-            has_fee_adjustment,
-            is_opening_balance_adjusted,
-            ref_no,
-            amount,
-            status,
-            paid_by,
-            cheque_no,
-            bank_name,
-            cheque_date,
-            online_txn_ref_no,
-            owner_id::text AS owner_id,
-            parent_id::text AS parent_id,
-            created_on,
-            created_by::text AS created_by,
-            modified_on,
-            modified_by::text AS modified_by
-        FROM fee_transaction
-        ORDER BY tx_date DESC NULLS LAST, id
-        LIMIT 20;
-        """
-    )
-    tx_columns = [desc[0] for desc in cur.description]
-    tx_rows = [dict(zip(tx_columns, row)) for row in cur.fetchall()]
-    tx_data = [to_fee_tx_camel_dict(row) for row in tx_rows]
-
-    return {
-        "reference": {
-            "note": "PostgreSQL-derived API-shaped payloads for fee and transaction read parity validation."
-        },
-        "endpoints": {
-            "feesList": {
-                "response": {
-                    "data": fees_data,
-                    "count": len(fees_data),
-                }
-            },
-            "feeTransactionsList": {
-                "response": {
-                    "data": tx_data,
-                    "count": len(tx_data),
-                }
-            },
-        },
-    }
 
 
 def raven_query_collection(
@@ -867,9 +700,6 @@ def upsert_fee(
     if not fee_id:
         return None
 
-    cur.execute("SELECT 1 FROM fee WHERE id = %s", (fee_id,))
-    is_new = cur.fetchone() is None
-
     cur.execute(
         """
         INSERT INTO fee (
@@ -892,13 +722,11 @@ def upsert_fee(
             created_by,
             modified_on,
             modified_by
-        )
-        VALUES (
+        ) VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
-        ON CONFLICT (id)
-        DO UPDATE SET
+        ON CONFLICT (id) DO UPDATE SET
             name = EXCLUDED.name,
             name_lower = EXCLUDED.name_lower,
             display_text = EXCLUDED.display_text,
@@ -917,12 +745,12 @@ def upsert_fee(
             created_by = EXCLUDED.created_by,
             modified_on = EXCLUDED.modified_on,
             modified_by = EXCLUDED.modified_by
-        RETURNING id;
+        RETURNING (xmax = 0);
         """,
         (
             fee_id,
             first_non_empty(doc.get("Name"), doc.get("DisplayText")),
-            doc.get("NameLower"),
+            (first_non_empty(doc.get("Name"), doc.get("DisplayText")) or "").lower() or None,
             doc.get("DisplayText"),
             parse_decimal(doc.get("Amount")),
             as_string_list(doc.get("Tags")),
@@ -943,7 +771,9 @@ def upsert_fee(
     )
 
     row = cur.fetchone()
-    return UpsertResult(str(row[0]), is_new) if row else None
+    if not row:
+        return None
+    return UpsertResult(fee_id, bool(row[0]))
 
 
 def upsert_fee_transaction(
@@ -952,9 +782,6 @@ def upsert_fee_transaction(
     tx_id = derive_raven_doc_uuid(doc)
     if not tx_id:
         return None
-
-    cur.execute("SELECT 1 FROM fee_transaction WHERE id = %s", (tx_id,))
-    is_new = cur.fetchone() is None
 
     cur.execute(
         """
@@ -986,14 +813,12 @@ def upsert_fee_transaction(
             created_by,
             modified_on,
             modified_by
-        )
-        VALUES (
+        ) VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s, %s
         )
-        ON CONFLICT (id)
-        DO UPDATE SET
+        ON CONFLICT (id) DO UPDATE SET
             tx_no = EXCLUDED.tx_no,
             tx_date = EXCLUDED.tx_date,
             student_id = EXCLUDED.student_id,
@@ -1020,7 +845,7 @@ def upsert_fee_transaction(
             created_by = EXCLUDED.created_by,
             modified_on = EXCLUDED.modified_on,
             modified_by = EXCLUDED.modified_by
-        RETURNING id;
+        RETURNING (xmax = 0);
         """,
         (
             tx_id,
@@ -1054,7 +879,9 @@ def upsert_fee_transaction(
     )
 
     row = cur.fetchone()
-    return UpsertResult(str(row[0]), is_new) if row else None
+    if not row:
+        return None
+    return UpsertResult(tx_id, bool(row[0]))
 
 
 def main() -> int:
@@ -1123,14 +950,10 @@ def main() -> int:
                     fee_txs_processed += 1
                     fee_txs_inserted += int(result.inserted)
 
-        api_payload_validation: Optional[Dict[str, Any]] = None
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM fee")
-            fee_count = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM fee_transaction")
-            fee_tx_count = int(cur.fetchone()[0])
-            if cfg.include_api_payload_validation:
-                api_payload_validation = build_api_payload_validation(cur)
+                cur.execute("SELECT count(*) FROM fee;")
+                fee_count = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM fee_transaction;")
+                fee_tx_count = cur.fetchone()[0]
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -1161,8 +984,6 @@ def main() -> int:
                 "fee_transaction": fee_tx_count,
             },
         }
-        if api_payload_validation is not None:
-            summary["api_payload_validation"] = api_payload_validation
 
         print("Migration completed.")
         print(f"fees_processed: {fees_processed}")

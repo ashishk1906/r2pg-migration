@@ -308,7 +308,9 @@ def status_code(value: Any) -> int:
     return -1
 
 
-def gender_code(value: Any) -> int:
+def gender_code(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
     mapping = {"Female": 0, "Male": 1, "NoInfo": 90}
     if value in mapping:
         return mapping[value]
@@ -318,25 +320,57 @@ def gender_code(value: Any) -> int:
             return val_int
     except (TypeError, ValueError):
         pass
-    return 90
+    return None
 
 
-def parse_student_gender(value: Any) -> str:
-    if value in ("Female", "Male", "NoInfo"):
-        return str(value)
-    try:
-        return {0: "Female", 1: "Male", 90: "NoInfo"}.get(int(value), "NoInfo")
-    except (TypeError, ValueError):
-        return "NoInfo"
+def parse_student_gender(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    s = str(value).strip()
+    if not s or s.lower() in {"null", "none"}:
+        return None
+    if s in ("Female", "Male", "NoInfo"):
+        return s
+    mapping = {
+        0: "Female",
+        1: "Male",
+        90: "NoInfo",
+        "0": "Female",
+        "1": "Male",
+        "90": "NoInfo",
+        "female": "Female",
+        "male": "Male",
+        "noinfo": "NoInfo",
+    }
+    if isinstance(value, int):
+        return mapping.get(value, None)
+    if s.isdigit():
+        return mapping.get(int(s), None)
+    return mapping.get(s.lower(), None)
 
 
 def parse_student_status(value: Any) -> str:
-    if value in ("Unknown", "Active", "Disabled"):
-        return str(value)
-    try:
-        return {-1: "Unknown", 1: "Active", 99: "Disabled"}.get(int(value), "Active")
-    except (TypeError, ValueError):
+    if value is None or value == "":
         return "Active"
+    s = str(value).strip()
+    if s in ("Unknown", "Active", "Disabled"):
+        return s
+    mapping = {
+        -1: "Unknown",
+        1: "Active",
+        99: "Disabled",
+        "-1": "Unknown",
+        "1": "Active",
+        "99": "Disabled",
+        "unknown": "Unknown",
+        "active": "Active",
+        "disabled": "Disabled",
+    }
+    if isinstance(value, int):
+        return mapping.get(value, "Active")
+    if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+        return mapping.get(int(s), "Active")
+    return mapping.get(s.lower(), "Active")
 
 
 def org_status_code(value: Any) -> int:
@@ -1997,8 +2031,11 @@ def main() -> int:
             password=cfg.pg_password,
         )
         conn.autocommit = True
-        with conn.cursor() as tz_cur:
-            tz_cur.execute("SET TIME ZONE 'UTC';")
+        with conn.cursor() as cur:
+            cur.execute("SET TIME ZONE 'UTC';")
+            print("[3/6] Ensuring target schema...")
+            ensure_target_schema(cur)
+            assert_required_schema(cur)
         conn.autocommit = False
 
         loaded_orgs = 0
@@ -2011,10 +2048,6 @@ def main() -> int:
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/6] Ensuring target schema...")
-                ensure_target_schema(cur)
-                assert_required_schema(cur)
-
                 print("[4/6] Upserting organizations...")
                 for d in org_docs:
                     result = upsert_organization(cur, d)

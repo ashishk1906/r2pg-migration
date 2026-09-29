@@ -256,10 +256,13 @@ def extract_member_view_fields(doc: Dict[str, Any]) -> Tuple:
     owner_id = clean_uuid(doc.get("OwnerId"))
     membership_id = clean_str(doc.get("MembershipId"), 100)
     member_type = clean_str(doc.get("MemberType"), 50)
-    issued_books = as_json(
-        doc.get("IssuedBooks") if isinstance(doc.get("IssuedBooks"), list) else [],
-        default_val=[],
-    )
+    raw_issued = doc.get("IssuedBooks")
+    if isinstance(raw_issued, list):
+        issued_books = [str(x).strip() for x in raw_issued if x is not None and str(x).strip()]
+    elif isinstance(raw_issued, str) and raw_issued.strip():
+        issued_books = [raw_issued.strip()]
+    else:
+        issued_books = []
 
     return (
         member_view_id,
@@ -284,7 +287,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             owner_id UUID,
             membership_id VARCHAR(100),
             member_type VARCHAR(50),
-            issued_books JSONB DEFAULT '[]'::jsonb
+            issued_books TEXT[] DEFAULT '{}'
         );
         """
     )

@@ -282,6 +282,19 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 # -----------------------------------------------------------------------------
 
 
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Convert raw value to list of strings for TEXT[], preserving None as SQL NULL."""
+    if raw_val is None:
+        return None
+    if isinstance(raw_val, list):
+        cleaned = [str(item).strip() for item in raw_val if item is not None and str(item).strip()]
+        return cleaned if cleaned else None
+    if isinstance(raw_val, str):
+        cleaned = raw_val.strip()
+        return [cleaned] if cleaned else None
+    return [str(raw_val)]
+
+
 def extract_institute_calendar_fields(doc: Dict[str, Any]) -> Tuple:
     """Extract and transform fields for institute_calendars table."""
     metadata = doc.get("@metadata") or {}
@@ -307,11 +320,9 @@ def extract_institute_calendar_fields(doc: Dict[str, Any]) -> Tuple:
     event_category_as_string = clean_str(doc.get("EventCategoryAsString"), 100)
     priority = clean_int(doc.get("Priority"), default=0)
 
-    # Audience can be a list, object, or string (or None)
-    raw_audience = doc.get("Audience")
-    audience = as_json(raw_audience) if raw_audience is not None else None
-
-    conducted_by = clean_str(doc.get("ConductedBy"), 255)
+    # Audience and ConductedBy are List<string> in C# InstituteCalendar, stored as nullable TEXT[]
+    audience = clean_string_list(doc.get("Audience"))
+    conducted_by = clean_string_list(doc.get("ConductedBy"))
 
     raw_dates = doc.get("EventDates")
     event_dates = as_json(
@@ -363,8 +374,8 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             event_category VARCHAR(100),
             event_category_as_string VARCHAR(100),
             priority INTEGER DEFAULT 0,
-            audience JSONB,
-            conducted_by VARCHAR(255),
+            audience TEXT[],
+            conducted_by TEXT[],
             event_dates JSONB DEFAULT '[]'::jsonb,
             owner_id UUID,
             parent_id UUID,

@@ -384,5 +384,107 @@ ame | Name | string | VARCHAR(150) |
 
 ---
 
+## circulation_views
+
+**Script:** `circulation_views_ravendb_to_postgres_migrate.py`
+**RavenDB Collection:** `CirculationViews`
+
+### Enums
+
+*None*
+
+---
+
+### Table: `circulation_views`
+
+**PostgreSQL Table:** `circulation_views`
+**RavenDB Source:** `CirculationViews` (C# `CirculationView : IReadModelLibrary`)
+**Primary Key:** `id` (`UUID`)
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `tracking_id` | `TrackingId` | `string` | `VARCHAR(100)` |
+| `issued_on` | `IssuedOn` | `DateTime` | `TIMESTAMPTZ` |
+| `received_on` | `ReceivedOn` | `DateTime` | `TIMESTAMPTZ` |
+| `due_on` | `DueOn` | `DateTime` | `TIMESTAMPTZ` |
+| `reissued_on` | `ReissuedOn` | `DateTime` | `TIMESTAMPTZ` |
+| `issued_to` | `IssuedTo` | `string` | `VARCHAR(100)` |
+
+---
+
+## commits
+
+**Script:** `commits_ravendb_to_postgres_migrate.py`
+**RavenDB Collections:** `CommitAssets`, `Commits`, `CommitAcs`
+
+### Enums
+
+*None*
+
+---
+
+### Tables: `commit_asset`, `commits`, `commit_ac`
+
+**PostgreSQL Tables:** `commit_asset`, `commits`, `commit_ac`
+**RavenDB Sources:**
+- `commit_asset` $\leftarrow$ `CommitAssets` (C# `CommitAssets`)
+- `commits` $\leftarrow$ `Commits` (C# `Commit`)
+- `commit_ac` $\leftarrow$ `CommitAcs` (C# `CommitAc`)
+**Primary Key:** `id` (`UUID`)
+
+All three tables share the same Common Commit Wrapper schema:
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `aggregate_id` | `AggregateId` | `string` (UUID) | `UUID` |
+| `version` | `Version` | `int` | `INTEGER` |
+| `user_id` | `UserId` | `string` (UUID) | `UUID` |
+| `inst_id` | `InstId` | `string` (UUID) | `UUID` |
+| `timestamp` | `TimeStamp` | `DateTime` | `TIMESTAMPTZ` |
+| `event_message` | `EventMessage` | `object` | `JSONB` |
+
+---
+
+## content_tags
+
+**Script:** `content_tags_ravendb_to_postgres_migrate.py`
+**RavenDB Collection:** `ContentTags`
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `content_tag_status_enum` | `Unknown`, `Active`, `Disabled` | `TagStatusEnum` | `Unknown` = 0, `Active` = 1, `Disabled` = 99 |
+
+---
+
+### Table: `content_tags`
+
+**PostgreSQL Table:** `content_tags`
+**RavenDB Source:** `ContentTags` (C# `ContentTag : Entity`)
+**Primary Key:** `id` (`UUID`)
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `name` | `Name` | `string` | `VARCHAR(255)` |
+| `predefined` | `Predefined` | `bool` | `BOOLEAN` |
+| `csn` | `CSN` | `string` | `VARCHAR(50)` |
+| `meta` | `Meta` | `Dictionary<string, string>` | `JSONB` |
+| `status` | `Status` | `TagStatusEnum` | `content_tag_status_enum` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+> **Note:** Remaining scripts (courses, emails, exams, fees, etc.) will be added in subsequent sections below.
+
 
 

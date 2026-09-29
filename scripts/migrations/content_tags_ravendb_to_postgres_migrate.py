@@ -247,10 +247,10 @@ def clean_bool(val: Any, default: bool = False) -> bool:
     return str(val).strip().lower() in {"true", "1", "yes"}
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -286,16 +286,16 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-def map_content_tag_status(val: Any) -> str:
+def map_content_tag_status(val: Any) -> Optional[str]:
     """Map status string/int to content_tag_status_enum."""
-    if val is None:
-        return "Active"
+    if val is None or (isinstance(val, str) and val.strip() == ""):
+        return None
     if isinstance(val, int):
-        return CONTENT_TAG_STATUS_MAP.get(val, "Active")
+        return CONTENT_TAG_STATUS_MAP.get(val)
     s = str(val).strip()
     if s.isdigit():
-        return CONTENT_TAG_STATUS_MAP.get(int(s), "Active")
-    return CONTENT_TAG_STATUS_MAP.get(s.lower(), "Active")
+        return CONTENT_TAG_STATUS_MAP.get(int(s))
+    return CONTENT_TAG_STATUS_MAP.get(s.lower())
 
 
 # -----------------------------------------------------------------------------
@@ -325,10 +325,8 @@ def extract_content_tag_fields(doc: Dict[str, Any]) -> Tuple:
     name = clean_str(doc.get("Name"), 255)
     predefined = clean_bool(doc.get("Predefined"), default=False)
     csn = clean_str(doc.get("CSN"), 50)
-    meta = as_json(
-        doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {},
-        default_val={},
-    )
+    raw_meta = doc.get("Meta")
+    meta = as_json(raw_meta) if isinstance(raw_meta, dict) else None
     status = map_content_tag_status(doc.get("Status"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
@@ -379,10 +377,10 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         CREATE TABLE IF NOT EXISTS content_tags (
             id UUID PRIMARY KEY,
             name VARCHAR(255),
-            predefined BOOLEAN DEFAULT FALSE,
+            predefined BOOLEAN,
             csn VARCHAR(50),
-            meta JSONB DEFAULT '{}'::jsonb,
-            status content_tag_status_enum NOT NULL DEFAULT 'Active',
+            meta JSONB,
+            status content_tag_status_enum,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ,

@@ -39,7 +39,7 @@ from psycopg2.extras import Json
 import requests
 
 UUID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
 
@@ -316,18 +316,12 @@ def raven_query_collection(
 
 
 def clean_uuid(raw_val: Any) -> Optional[str]:
-    """
-    Validate and return canonical UUID string.
-    Safely converts empty strings, None, or invalid values to None.
-    """
-    if raw_val is None:
+    """Validate and return canonical UUID string."""
+    if not raw_val:
         return None
     val_str = str(raw_val).strip()
-    if not val_str:
-        return None
-    if UUID_RE.match(val_str):
-        return val_str.lower()
-    return None
+    match = UUID_RE.search(val_str)
+    return match.group(0).lower() if match else None
 
 
 def parse_iso_timestamp(raw_val: Any) -> Optional[datetime]:
@@ -353,11 +347,11 @@ def extract_commit_fields(
 ) -> Tuple[
     str,
     Optional[str],
-    int,
+    Optional[int],
     Optional[str],
     Optional[str],
     datetime,
-    Dict[str, Any],
+    Optional[Dict[str, Any]],
 ]:
     """Extract and validate all fields for the Common Commit Wrapper."""
     metadata = doc.get("@metadata", {})
@@ -374,27 +368,31 @@ def extract_commit_fields(
     raw_agg_id = doc.get("AggregateId") or doc.get("aggregate_id")
     agg_id = clean_uuid(raw_agg_id)
 
-    # 3. Version (int)
-    raw_ver = doc.get("Version", 1)
+    # 3. Version (int or None)
+    raw_ver = doc.get("Version")
     try:
-        version = int(raw_ver)
+        version = int(raw_ver) if raw_ver is not None else None
     except (ValueError, TypeError):
-        version = 1
+        version = None
 
     # 4. UserId (UUID or None)
     user_id = clean_uuid(doc.get("UserId"))
 
-    # 5. InstId (UUID or None - gracefully handles empty string "")
+    # 5. InstId (UUID or None)
     inst_id = clean_uuid(doc.get("InstId"))
 
     # 6. Timestamp
     raw_ts = doc.get("TimeStamp") or metadata.get("@last-modified")
     ts = parse_iso_timestamp(raw_ts) or datetime.now(timezone.utc)
 
-    # 7. EventMessage (dict / JSON payload)
-    event_msg = doc.get("EventMessage")
-    if not isinstance(event_msg, dict):
-        event_msg = {"Payload": event_msg}
+    # 7. EventMessage (dict / JSON payload or None)
+    raw_event = doc.get("EventMessage")
+    if raw_event is None:
+        event_msg = None
+    elif isinstance(raw_event, (dict, list)):
+        event_msg = raw_event
+    else:
+        event_msg = {"Payload": raw_event}
 
     return (
         commit_id,
@@ -414,102 +412,39 @@ def extract_commit_fields(
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     """Create all enums, tables, views, and indexes idempotently."""
-    # 1. Custom PostgreSQL ENUMs
+def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
+    """Create target commit tables without secondary indexes or views."""
     cur.execute(
         """
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'inventory_journal_status_enum') THEN
-                CREATE TYPE inventory_journal_status_enum AS ENUM (
-                    'Active',
-                    'Disabled'
-                );
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'asset_status_enum') THEN
-                CREATE TYPE asset_status_enum AS ENUM (
-                    'Active',
-                    'Cleared',
-                    'Disabled'
-                );
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'material_status_enum') THEN
-                CREATE TYPE material_status_enum AS ENUM (
-                    'Active',
-                    'Reserved',
-                    'Issued',
-                    'UnderMaintenance',
-                    'OutOfCirculation',
-                    'Disabled'
-                );
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'owner_status_enum') THEN
-                CREATE TYPE owner_status_enum AS ENUM (
-                    'Current',
-                    'Past'
-                );
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'voucher_type_enum') THEN
-                CREATE TYPE voucher_type_enum AS ENUM (
-                    'Expense',
-                    'Income',
-                    'Journal'
-                );
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'voucher_status_enum') THEN
-                CREATE TYPE voucher_status_enum AS ENUM (
-                    'Active',
-                    'Disabled'
-                );
-            END IF;
-        END $$;
-        """
-    )
+        CREATE TABLE IF NOT EXISTS commit_asset (
+            id UUID PRIMARY KEY,
+            aggregate_id UUID,
+            version INTEGER,
+            user_id UUID,
+            inst_id UUID,
+            timestamp TIMESTAMPTZ,
+            event_message JSONB
+        );
 
-    # 2. Target Tables: commit_asset, commits, commit_ac
-    table_definitions = [
-        ("commit_asset", "CommitAssets"),
-        ("commits", "Commits"),
-        ("commit_ac", "CommitAcs"),
-    ]
+        CREATE TABLE IF NOT EXISTS commits (
+            id UUID PRIMARY KEY,
+            aggregate_id UUID,
+            version INTEGER,
+            user_id UUID,
+            inst_id UUID,
+            timestamp TIMESTAMPTZ,
+            event_message JSONB
+        );
 
-    for table_name, default_coll in table_definitions:
-        cur.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {table_name} (
-                id UUID PRIMARY KEY,
-                aggregate_id UUID,
-                version INTEGER NOT NULL,
-                user_id UUID,
-                inst_id UUID,
-                timestamp TIMESTAMPTZ NOT NULL,
-                event_message JSONB NOT NULL
-            );
-            ALTER TABLE {table_name} ALTER COLUMN aggregate_id DROP NOT NULL;
-            ALTER TABLE {table_name} DROP COLUMN IF EXISTS event_type;
-            ALTER TABLE {table_name} DROP COLUMN IF EXISTS collection;
-            ALTER TABLE {table_name} DROP COLUMN IF EXISTS raven_clr_type;
-            ALTER TABLE {table_name} DROP COLUMN IF EXISTS raven_change_vector;
-            ALTER TABLE {table_name} DROP COLUMN IF EXISTS raven_last_modified;
-            DROP INDEX IF EXISTS {table_name}_event_type_idx;
-            """
-        )
-
-        # Performance Indexes
-        cur.execute(
-            f"""
-            CREATE INDEX IF NOT EXISTS {table_name}_aggregate_id_idx ON {table_name} (aggregate_id);
-            CREATE INDEX IF NOT EXISTS {table_name}_timestamp_idx ON {table_name} (timestamp);
-            CREATE INDEX IF NOT EXISTS {table_name}_inst_id_idx ON {table_name} (inst_id);
-            CREATE INDEX IF NOT EXISTS {table_name}_event_message_gin_idx ON {table_name} USING GIN (event_message);
-            """
-        )
-
-    # Clean up any previously created views if present
-    cur.execute(
-        """
-        DROP VIEW IF EXISTS commit_assets, commit_acs, v_all_commits,
-            v_asset_created_event, v_stock_verified_event, v_material_created_event,
-            v_inventory_journal_created_event, v_voucher_created_event CASCADE;
+        CREATE TABLE IF NOT EXISTS commit_ac (
+            id UUID PRIMARY KEY,
+            aggregate_id UUID,
+            version INTEGER,
+            user_id UUID,
+            inst_id UUID,
+            timestamp TIMESTAMPTZ,
+            event_message JSONB
+        );
         """
     )
 
@@ -567,7 +502,7 @@ def upsert_commit_document(
             user_id,
             inst_id,
             ts,
-            Json(event_msg),
+            Json(event_msg) if event_msg is not None else None,
         ),
     )
     row = cur.fetchone()

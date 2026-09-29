@@ -316,15 +316,15 @@ TAG_STATUS_MAP: Dict[Any, str] = {
 }
 
 
-def map_tag_status(val: Any) -> str:
-    if val is None:
-        return "Active"
+def map_tag_status(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
     if isinstance(val, int):
-        return TAG_STATUS_MAP.get(val, "Active")
+        return TAG_STATUS_MAP.get(val, None)
     s = str(val).strip()
     if s.isdigit():
-        return TAG_STATUS_MAP.get(int(s), "Active")
-    return TAG_STATUS_MAP.get(s.lower(), "Active")
+        return TAG_STATUS_MAP.get(int(s), None)
+    return TAG_STATUS_MAP.get(s.lower(), s if s in {"Unknown", "Active", "Disabled"} else None)
 
 
 # ArtefactStatusEnum: Unknown=0, Active=1, Etl=60, Published=70, PublishedToPublic=75, Uploaded=80, Downloaded=90, Disabled=99
@@ -349,16 +349,16 @@ ARTEFACT_STATUS_MAP: Dict[Any, str] = {
 }
 
 
-def map_artefact_status(val: Any) -> str:
-    if val is None:
-        return "Active"
+def map_artefact_status(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
     if isinstance(val, int):
-        return ARTEFACT_STATUS_MAP.get(val, "Active")
+        return ARTEFACT_STATUS_MAP.get(val, None)
     s = str(val).strip()
     if s.isdigit():
-        return ARTEFACT_STATUS_MAP.get(int(s), "Active")
+        return ARTEFACT_STATUS_MAP.get(int(s), None)
     norm = s.lower().replace(" ", "").replace("_", "")
-    return ARTEFACT_STATUS_MAP.get(norm, "Active")
+    return ARTEFACT_STATUS_MAP.get(norm, s if s in {"Unknown", "Active", "Etl", "Published", "PublishedToPublic", "Uploaded", "Downloaded", "Disabled"} else None)
 
 
 # -----------------------------------------------------------------------------
@@ -377,7 +377,7 @@ def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
     name = clean_str(doc.get("Name"), 150)
     predefined = clean_bool(doc.get("Predefined"))
     csn = clean_str(doc.get("CSN"), 100)
-    meta = as_json(doc.get("Meta") or {})
+    meta = as_json(doc.get("Meta")) if doc.get("Meta") is not None else None
     status = map_tag_status(doc.get("Status"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
@@ -416,7 +416,7 @@ def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
     url = clean_str(doc.get("Url"))
     title = clean_str(doc.get("Title"), 250)
     description = clean_str(doc.get("Description"))
-    meta_data = as_json(doc.get("MetaData") or {})
+    meta_data = as_json(doc.get("MetaData")) if doc.get("MetaData") is not None else None
 
     tags = clean_string_list(doc.get("Tags"))
 
@@ -431,10 +431,14 @@ def extract_artefact_fields(doc: Dict[str, Any]) -> Tuple:
     template = clean_str(doc.get("Template"))
     csv_val = clean_str(doc.get("Csv"))
 
-    change_set = as_json(doc.get("ChangeSet") if isinstance(doc.get("ChangeSet"), list) else [])
-    comments = as_json(doc.get("Comments") if isinstance(doc.get("Comments"), list) else [])
-    video_links = as_json(doc.get("VideoLinks") if isinstance(doc.get("VideoLinks"), list) else [])
-    data_attributes = as_json(doc.get("DataAttributes") if isinstance(doc.get("DataAttributes"), list) else [])
+    raw_cs = doc.get("ChangeSet")
+    change_set = as_json(raw_cs) if isinstance(raw_cs, list) else None
+    raw_comments = doc.get("Comments")
+    comments = as_json(raw_comments) if isinstance(raw_comments, list) else None
+    raw_vl = doc.get("VideoLinks")
+    video_links = as_json(raw_vl) if isinstance(raw_vl, list) else None
+    raw_da = doc.get("DataAttributes")
+    data_attributes = as_json(raw_da) if isinstance(raw_da, list) else None
 
     published_on = parse_iso_timestamp(doc.get("PublishedOn"))
     public_urls = clean_string_list(doc.get("PublicUrls"))
@@ -489,7 +493,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     """Create target enums, artefact_tags and artefacts tables."""
     cur.execute(
         """
-        -- 1. Create Enums
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tag_status_enum') THEN
@@ -513,48 +516,46 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             END IF;
         END $$;
 
-        -- 2. ArtefactTags Table
         CREATE TABLE IF NOT EXISTS artefact_tags (
             id UUID PRIMARY KEY,
             name VARCHAR(150),
-            predefined BOOLEAN DEFAULT FALSE,
+            predefined BOOLEAN,
             csn VARCHAR(100),
-            meta JSONB DEFAULT '{}'::jsonb,
-            status tag_status_enum NOT NULL DEFAULT 'Active',
+            meta JSONB,
+            status tag_status_enum,
             owner_id UUID,
             parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
+            created_on TIMESTAMPTZ,
             created_by UUID,
             modified_on TIMESTAMPTZ,
             modified_by UUID
         );
 
-        -- 3. Artefacts Table
         CREATE TABLE IF NOT EXISTS artefacts (
             id UUID PRIMARY KEY,
             url TEXT,
             title VARCHAR(250),
             description TEXT,
-            meta_data JSONB DEFAULT '{}'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
+            meta_data JSONB,
+            tags TEXT[],
             mime_type VARCHAR(100),
             file_name VARCHAR(250),
             file_size DOUBLE PRECISION,
-            status artefact_status_enum NOT NULL DEFAULT 'Active',
+            status artefact_status_enum,
             sha1 VARCHAR(100),
             model TEXT,
             template TEXT,
             csv TEXT,
-            change_set JSONB DEFAULT '[]'::jsonb,
-            comments JSONB DEFAULT '[]'::jsonb,
-            video_links JSONB DEFAULT '[]'::jsonb,
-            data_attributes JSONB DEFAULT '[]'::jsonb,
+            change_set JSONB,
+            comments JSONB,
+            video_links JSONB,
+            data_attributes JSONB,
             published_on TIMESTAMPTZ,
-            public_urls TEXT[] DEFAULT '{}'::text[],
-            thumbnails TEXT[] DEFAULT '{}'::text[],
+            public_urls TEXT[],
+            thumbnails TEXT[],
             owner_id UUID,
             parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
+            created_on TIMESTAMPTZ,
             created_by UUID,
             modified_on TIMESTAMPTZ,
             modified_by UUID
@@ -780,13 +781,6 @@ def main() -> int:
                     loaded_arts += 1
                     new_arts += int(res.inserted)
 
-        # Post-load verification counts
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM artefact_tags")
-            total_tags = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM artefacts")
-            total_artefacts = int(cur.fetchone()[0])
-
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
@@ -808,10 +802,6 @@ def main() -> int:
                 "new_tags_inserted": new_tags,
                 "artefacts_processed": loaded_arts,
                 "new_artefacts_inserted": new_arts,
-            },
-            "post_load_counts": {
-                "artefact_tags": total_tags,
-                "artefacts": total_artefacts,
             },
         }
 

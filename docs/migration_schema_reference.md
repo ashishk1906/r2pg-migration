@@ -203,4 +203,71 @@ ame | Name | string | VARCHAR(150) |
 
 ---
 
-> **Note:** Remaining scripts (assessments, asset_views, attendance_events, calendar_rules, etc.) will be added in subsequent sections below.
+## assessments
+
+**Script:** `assessments_ravendb_to_postgres_migrate.py`
+**RavenDB Collections:** `AssessmentTags`, `Assessments`
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `tag_status_enum` | `Unknown`, `Active`, `Disabled` | `TagStatusEnum` | `Unknown` = 0, `Active` = 1, `Disabled` = 99 |
+| `assessment_status_enum` | `Unknown`, `Active`, `WIP`, `Published`, `Archived`, `Disabled` | `AssessmentStatusEnum` | `Unknown` = 0, `Active` = 1, `WIP` = 40, `Published` = 50, `Archived` = 80, `Disabled` = 99 |
+
+---
+
+### Table: `assessment_tags`
+
+**PostgreSQL Table:** `assessment_tags`
+**RavenDB Source:** `AssessmentTags` (Entity: `AssessmentTag : Entity`)
+**Primary Key:** `id` (`UUID`)
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `name` | `Name` | `string` | `VARCHAR(150)` |
+| `predefined` | `Predefined` | `bool` | `BOOLEAN` |
+| `csn` | `CSN` | `string` | `VARCHAR(100)` |
+| `meta` | `Meta` | `Dictionary<string, string>` | `JSONB` |
+| `status` | `Status` | `TagStatusEnum` | `tag_status_enum` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+### Table: `assessments`
+
+**PostgreSQL Table:** `assessments`
+**RavenDB Source:** `Assessments` (Entity: `Assessment : Entity`)
+**Primary Key:** `id` (`UUID`)
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `total_marks` | `TotalMarks` | `decimal` | `NUMERIC(14, 2)` |
+| `description` | `Description` | `string` | `TEXT` |
+| `subject` | `Subject` | `string` | `VARCHAR(150)` |
+| `subject_code` | `SubjectCode` | `string` | `VARCHAR(50)` |
+| `duration` | `Duration` | `int` | `INT` |
+| `sections` | `Sections` | `List<AssessmentSection>` | `JSONB` |
+| `status` | `Status` | `AssessmentStatusEnum` | `assessment_status_enum` |
+| `multiple_attempts` | `MultipleAttempts` | `bool` | `BOOLEAN` |
+| `tags` | `Tags` | `List<string>` | `TEXT[]` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+> **Null rule:** All JSONB and TEXT[] columns store NULL if the field is null/missing in RavenDB.
+
+---
+
+> **Note:** Remaining scripts (asset_views, attendance_events, calendar_rules, etc.) will be added in subsequent sections below.
+

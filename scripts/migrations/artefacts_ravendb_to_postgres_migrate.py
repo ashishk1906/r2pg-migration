@@ -250,15 +250,16 @@ def clean_decimal(val: Any) -> Optional[Decimal]:
         return None
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Convert raw value to list of strings for TEXT[], preserving None as SQL NULL."""
     if raw_val is None:
-        return []
+        return None
     if isinstance(raw_val, list):
-        return [str(item).strip() for item in raw_val if str(item).strip()]
+        cleaned = [str(item).strip() for item in raw_val if item is not None and str(item).strip()]
+        return cleaned if cleaned else None
     if isinstance(raw_val, str):
         cleaned = raw_val.strip()
-        return [cleaned] if cleaned else []
+        return [cleaned] if cleaned else None
     return [str(raw_val)]
 
 

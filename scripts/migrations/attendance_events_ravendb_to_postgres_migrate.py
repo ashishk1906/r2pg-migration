@@ -16,7 +16,7 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 import requests
@@ -43,7 +43,6 @@ class Config:
     timeout_sec: int
     summary_json_path: Optional[str]
     write_summary_json: bool
-    inspect_source_only: bool
 
 
 @dataclass
@@ -142,15 +141,9 @@ def parse_args() -> Config:
         action="store_true",
         help="Disable writing post-run summary JSON artifact.",
     )
-    parser.add_argument(
-        "--inspect-source-only",
-        action="store_true",
-        help="Fetch RavenDB AttendanceEvents and print profile without writing to PostgreSQL.",
-    )
 
     args = parser.parse_args()
 
-    # Resolve certificate path if needed
     if args.raven_cert_file and not os.path.isabs(args.raven_cert_file):
         for cert_dir in (
             os.getcwd(),
@@ -179,7 +172,6 @@ def parse_args() -> Config:
         timeout_sec=max(1, args.timeout_sec),
         summary_json_path=args.summary_json_path,
         write_summary_json=not args.no_summary_json,
-        inspect_source_only=args.inspect_source_only,
     )
 
 
@@ -191,7 +183,7 @@ def write_summary_json(path_text: str, payload: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Data Parsing & Normalization Helpers (Students Pattern)
+# Data Parsing & Normalization Helpers
 # ---------------------------------------------------------------------------
 
 def clean_uuid(raw_val: Any) -> Optional[str]:
@@ -280,9 +272,13 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 
 
 def extract_attendance_event_fields(doc: Dict[str, Any]) -> Optional[Tuple]:
-    """Extract and validate 18 business fields from RavenDB document.
-    
-    Metadata fields (@metadata, @collection, Raven-Clr-Type) are excluded.
+    """Extract and validate business fields from RavenDB document.
+
+    C# AttendanceEvent (extends Entity) fields:
+    Entity base: Id, OwnerId, ParentId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy
+    AttendanceEvent: InstId, CourseId, TermName, SectionName, Date (DateTime),
+    PeriodNo (int), SubjectName, IsOptionalSubject (bool), StudentId, StaffId,
+    Attendance (string - plain string, not an enum in C#)
     """
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
@@ -386,13 +382,14 @@ def fetch_all_raven_documents(
 
 
 # ---------------------------------------------------------------------------
-# Target Schema Setup & Validation
+# Target Schema Setup
 # ---------------------------------------------------------------------------
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     """Create target attendance_event table with correct schema.
-    
-    Zero secondary indexes are created — only PRIMARY KEY on id.
+
+    C# AttendanceEvent has no enum fields - Attendance is a plain string.
+    No NOT NULL constraints or DEFAULT values are added beyond the primary key.
     """
     cur.execute(
         """
@@ -405,7 +402,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             date                TIMESTAMPTZ,
             period_no           INTEGER,
             subject_name        VARCHAR(200),
-            is_optional_subject BOOLEAN DEFAULT FALSE,
+            is_optional_subject BOOLEAN,
             student_id          UUID,
             staff_id            VARCHAR(100),
             attendance          VARCHAR(50),
@@ -418,81 +415,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         );
         """
     )
-
-
-def assert_required_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Verify that attendance_event table has all 18 required columns and data types."""
-    required_columns = (
-        "id",
-        "inst_id",
-        "course_id",
-        "term_name",
-        "section_name",
-        "date",
-        "period_no",
-        "subject_name",
-        "is_optional_subject",
-        "student_id",
-        "staff_id",
-        "attendance",
-        "created_on",
-        "created_by",
-        "owner_id",
-        "parent_id",
-        "modified_on",
-        "modified_by",
-    )
-    required_types: Dict[str, Sequence[str]] = {
-        "id": ("character varying", "text"),
-        "inst_id": ("uuid",),
-        "course_id": ("uuid",),
-        "term_name": ("character varying", "text"),
-        "section_name": ("character varying", "text"),
-        "date": ("timestamp with time zone", "timestamptz"),
-        "period_no": ("integer",),
-        "subject_name": ("character varying", "text"),
-        "is_optional_subject": ("boolean",),
-        "student_id": ("uuid",),
-        "staff_id": ("character varying", "text"),
-        "attendance": ("character varying", "text"),
-        "created_on": ("timestamp with time zone", "timestamptz"),
-        "created_by": ("uuid",),
-        "owner_id": ("uuid",),
-        "parent_id": ("uuid",),
-        "modified_on": ("timestamp with time zone", "timestamptz"),
-        "modified_by": ("uuid",),
-    }
-
-    cur.execute(
-        """
-        SELECT column_name, data_type, udt_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = 'attendance_event';
-        """
-    )
-    rows = cur.fetchall()
-    existing = {row[0] for row in rows}
-    type_by_column = {row[0]: str(row[1]).lower() for row in rows}
-    udt_by_column = {row[0]: str(row[2]).lower() for row in rows}
-
-    missing = [col for col in required_columns if col not in existing]
-    if missing:
-        raise RuntimeError(
-            f"Table public.attendance_event is missing required columns: {', '.join(missing)}"
-        )
-
-    mismatches = []
-    for col, exp_types in required_types.items():
-        actual_type = type_by_column.get(col)
-        actual_udt = udt_by_column.get(col)
-        if actual_type not in exp_types and actual_udt not in exp_types:
-            mismatches.append(
-                f"{col} expected {', '.join(exp_types)} but found {actual_type} ({actual_udt})"
-            )
-    if mismatches:
-        raise RuntimeError(
-            f"Table public.attendance_event has datatype mismatches: {'; '.join(mismatches)}"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -577,17 +499,13 @@ def main() -> int:
             f"collection={cfg.attendance_events_collection}"
         )
 
-        print("[1/5] Fetching RavenDB documents...")
+        print("[1/4] Fetching RavenDB documents...")
         event_docs = fetch_all_raven_documents(
             requests_session, cfg, cfg.attendance_events_collection
         )
         print(f"Fetched attendance_events={len(event_docs)}")
 
-        if cfg.inspect_source_only:
-            print(json.dumps({"attendance_event_documents": len(event_docs)}, indent=2))
-            return 0
-
-        print("[2/5] Connecting PostgreSQL...")
+        print("[2/4] Connecting PostgreSQL...")
         print(
             f"PostgreSQL target: host={cfg.pg_host}, port={cfg.pg_port}, "
             f"db={cfg.pg_db}, user={cfg.pg_user}"
@@ -604,13 +522,12 @@ def main() -> int:
             tz_cur.execute("SET TIME ZONE 'UTC';")
         conn.autocommit = False
 
-        print("[3/5] Setting up target schema...")
+        print("[3/4] Setting up target schema...")
         with conn:
             with conn.cursor() as cur:
                 ensure_target_schema(cur)
-                assert_required_schema(cur)
 
-        print("[4/5] Upserting attendance events...")
+        print("[4/4] Upserting attendance events...")
         events_processed = 0
         events_inserted = 0
 
@@ -621,11 +538,6 @@ def main() -> int:
                     if result is not None:
                         events_processed += 1
                         events_inserted += int(result.inserted)
-
-        print("[5/5] Validating migration...")
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM attendance_event;")
-            final_count = int(cur.fetchone()[0])
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -642,14 +554,10 @@ def main() -> int:
                 "pg_port": cfg.pg_port,
                 "pg_db": cfg.pg_db,
                 "table": "attendance_event",
-                "final_row_count": final_count,
             },
             "run_stats": {
                 "attendance_events_processed": events_processed,
                 "new_attendance_events_inserted": events_inserted,
-            },
-            "post_load_counts": {
-                "attendance_event": final_count,
             },
         }
 

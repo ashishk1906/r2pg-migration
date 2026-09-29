@@ -31,14 +31,30 @@ UUID_RE = re.compile(
 
 UUID_NAMESPACE_CALENDAR_RULES = uuid.UUID("6ba7b81a-9dad-11d1-80b4-00c04fd430c8")
 
+# C# CalendarRuleStatusEnum: Active=1, Disabled=99
 CALENDAR_RULE_STATUS_MAP: Dict[Any, str] = {
-    0: "Unknown",
     1: "Active",
     99: "Disabled",
-    "unknown": "Unknown",
+    "1": "Active",
+    "99": "Disabled",
     "active": "Active",
     "disabled": "Disabled",
-    "inactive": "Disabled",
+}
+
+# C# CalendarEventCategoryEnum: Event=10, Holiday=20, WeeklyHoliday=30, Exam=40
+CALENDAR_EVENT_CATEGORY_MAP: Dict[Any, str] = {
+    10: "Event",
+    20: "Holiday",
+    30: "WeeklyHoliday",
+    40: "Exam",
+    "10": "Event",
+    "20": "Holiday",
+    "30": "WeeklyHoliday",
+    "40": "Exam",
+    "event": "Event",
+    "holiday": "Holiday",
+    "weeklyholiday": "WeeklyHoliday",
+    "exam": "Exam",
 }
 
 
@@ -239,8 +255,8 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_int(val: Any, default: Optional[int] = 0) -> Optional[int]:
-    if val is None:
+def clean_int(val: Any, default: Optional[int] = None) -> Optional[int]:
+    if val is None or val == "":
         return default
     try:
         return int(val)
@@ -257,7 +273,7 @@ def clean_bool(val: Any, default: bool = False) -> bool:
 
 
 def parse_iso_timestamp(val: Any) -> Optional[datetime]:
-    """Parse ISO timestamp safely, preserving 0001-01-01 without converting to NULL."""
+    """Parse ISO timestamp safely."""
     if not val:
         return None
     text = str(val).strip()
@@ -288,19 +304,7 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-CALENDAR_EVENT_CATEGORY_MAP: Dict[Any, str] = {
-    10: "Event",
-    20: "Holiday",
-    30: "WeeklyHoliday",
-    40: "Exam",
-    "event": "Event",
-    "holiday": "Holiday",
-    "weeklyholiday": "WeeklyHoliday",
-    "exam": "Exam",
-}
-
-
-def clean_decimal(val: Any, default: Any = 0.0) -> Optional[Decimal]:
+def clean_decimal(val: Any, default: Any = None) -> Optional[Decimal]:
     if val is None or val == "":
         return Decimal(str(default)) if default is not None else None
     try:
@@ -309,37 +313,48 @@ def clean_decimal(val: Any, default: Any = 0.0) -> Optional[Decimal]:
         return Decimal(str(default)) if default is not None else None
 
 
-def map_calendar_rule_status(val: Any) -> str:
-    """Map status string/int to calendar_rule_status_enum."""
-    if val is None:
-        return "Active"
+def map_calendar_rule_status(val: Any) -> Optional[str]:
+    """Map status string/int to calendar_rule_status_enum.
+    Returns None if null in RavenDB (C#: Active=1, Disabled=99).
+    """
+    if val is None or (isinstance(val, str) and val.strip() == ""):
+        return None
     if isinstance(val, int):
-        return CALENDAR_RULE_STATUS_MAP.get(val, "Active")
+        return CALENDAR_RULE_STATUS_MAP.get(val)
     s = str(val).strip()
     if s.isdigit():
-        return CALENDAR_RULE_STATUS_MAP.get(int(s), "Active")
-    return CALENDAR_RULE_STATUS_MAP.get(s.lower(), "Active")
+        return CALENDAR_RULE_STATUS_MAP.get(int(s))
+    return CALENDAR_RULE_STATUS_MAP.get(s.lower())
 
 
-def map_calendar_event_category(val: Any) -> str:
-    """Map category string/int to calendar_event_category_enum."""
-    if val is None:
-        return "Event"
+def map_calendar_event_category(val: Any) -> Optional[str]:
+    """Map category string/int to calendar_event_category_enum.
+    Returns None if null in RavenDB (C#: Event=10, Holiday=20, WeeklyHoliday=30, Exam=40).
+    """
+    if val is None or (isinstance(val, str) and val.strip() == ""):
+        return None
     if isinstance(val, int):
-        return CALENDAR_EVENT_CATEGORY_MAP.get(val, "Event")
+        return CALENDAR_EVENT_CATEGORY_MAP.get(val)
     s = str(val).strip()
     if s.isdigit():
-        return CALENDAR_EVENT_CATEGORY_MAP.get(int(s), "Event")
-    return CALENDAR_EVENT_CATEGORY_MAP.get(s.lower(), s)
+        return CALENDAR_EVENT_CATEGORY_MAP.get(int(s))
+    return CALENDAR_EVENT_CATEGORY_MAP.get(s.lower())
 
 
 # -----------------------------------------------------------------------------
-# Document Field Extractor (Only RavenDB fields, no metadata columns)
+# Document Field Extractor
 # -----------------------------------------------------------------------------
 
 
 def extract_calendar_rule_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for calendar_rules table."""
+    """Extract and transform fields for calendar_rules table.
+
+    C# CalendarRule (extends Entity) fields:
+    Entity base: Id, OwnerId, ParentId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy
+    CalendarRule: Title, CronExpression, CalendarRuleStatus (CalendarRuleStatusEnum),
+    CalendarEventCategory (CalendarEventCategoryEnum), Weight (int), Duration (decimal),
+    TopicId, UserId, CreateMeetingLink (bool)
+    """
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
     rule_id = None
@@ -401,14 +416,18 @@ def extract_calendar_rule_fields(doc: Dict[str, Any]) -> Tuple:
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create target enums and calendar_rules table without secondary indexes or views."""
+    """Create target enums and calendar_rules table without secondary indexes or views.
+
+    C# CalendarRuleStatusEnum: Active=1, Disabled=99 (no Unknown)
+    C# CalendarEventCategoryEnum: Event=10, Holiday=20, WeeklyHoliday=30, Exam=40
+    No NOT NULL constraints on enum columns — null in RavenDB stays NULL in PostgreSQL.
+    """
     cur.execute(
         """
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'calendar_rule_status_enum') THEN
                 CREATE TYPE calendar_rule_status_enum AS ENUM (
-                    'Unknown',
                     'Active',
                     'Disabled'
                 );
@@ -427,13 +446,13 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             id UUID PRIMARY KEY,
             title VARCHAR(255),
             cron_expression VARCHAR(100),
-            calendar_rule_status calendar_rule_status_enum NOT NULL DEFAULT 'Active',
-            calendar_event_category calendar_event_category_enum NOT NULL DEFAULT 'Event',
-            weight INTEGER DEFAULT 0,
-            duration NUMERIC(10, 2) DEFAULT 0.00,
+            calendar_rule_status calendar_rule_status_enum,
+            calendar_event_category calendar_event_category_enum,
+            weight INTEGER,
+            duration NUMERIC(10, 2),
             topic_id UUID,
             user_id UUID,
-            create_meeting_link BOOLEAN DEFAULT FALSE,
+            create_meeting_link BOOLEAN,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ,

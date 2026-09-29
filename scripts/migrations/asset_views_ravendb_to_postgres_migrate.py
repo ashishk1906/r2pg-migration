@@ -28,6 +28,7 @@ UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
+# C# AssetStatusEnum: Active=1, Cleared=90, Disabled=99
 ASSET_STATUS_MAP: Dict[Any, str] = {
     1: "Active",
     90: "Cleared",
@@ -252,7 +253,7 @@ def clean_bool(val: Any, default: bool = False) -> bool:
     return default
 
 
-def parse_decimal(val: Any, default: Optional[Decimal] = Decimal("0.00")) -> Optional[Decimal]:
+def parse_decimal(val: Any, default: Optional[Decimal] = None) -> Optional[Decimal]:
     if val is None or val == "":
         return default
     try:
@@ -291,25 +292,30 @@ def as_json(value: Any) -> Optional[Json]:
     return Json(value)
 
 
-def map_asset_status(raw_val: Any) -> str:
-    """Map status string/int to asset_status_enum."""
-    if raw_val is None:
-        return "Active"
+def map_asset_status(raw_val: Any) -> Optional[str]:
+    """Map status string/int to asset_status_enum. Returns None if null in RavenDB."""
+    if raw_val is None or (isinstance(raw_val, str) and raw_val.strip() == ""):
+        return None
     if isinstance(raw_val, int):
-        return ASSET_STATUS_MAP.get(raw_val, "Active")
+        return ASSET_STATUS_MAP.get(raw_val)
     norm = str(raw_val).strip().lower()
     if norm.isdigit():
-        return ASSET_STATUS_MAP.get(int(norm), "Active")
-    return ASSET_STATUS_MAP.get(norm, "Active")
+        return ASSET_STATUS_MAP.get(int(norm))
+    return ASSET_STATUS_MAP.get(norm)
 
 
 # -----------------------------------------------------------------------------
-# Document Field Extractor (Only RavenDB fields, no metadata columns)
+# Document Field Extractor
 # -----------------------------------------------------------------------------
 
 
 def extract_asset_view_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for asset_views table."""
+    """Extract and transform fields for asset_views table.
+
+    C# AssetView fields: Id, TrackingId, OwnerId, Location, Attributes (string),
+    Tags (List<string>), Value (decimal), LastMaintenance (Maintenance object),
+    CurrentWarranty (Warranty object), Status (AssetStatusEnum), UnderWarranty (computed).
+    """
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
     asset_id = clean_uuid(raw_id)
@@ -325,6 +331,7 @@ def extract_asset_view_fields(doc: Dict[str, Any]) -> Tuple:
     last_maintenance = as_json(doc.get("LastMaintenance"))
     current_warranty = as_json(doc.get("CurrentWarranty"))
     status = map_asset_status(doc.get("Status"))
+    # UnderWarranty is a computed property in C# (not stored independently in RavenDB)
     under_warranty = clean_bool(doc.get("UnderWarranty"), default=False)
 
     return (
@@ -369,11 +376,11 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             location VARCHAR(250),
             attributes JSONB,
             tags TEXT[],
-            value NUMERIC(18, 2) DEFAULT 0.00,
+            value NUMERIC(18, 2),
             last_maintenance JSONB,
             current_warranty JSONB,
-            status asset_status_enum NOT NULL DEFAULT 'Active',
-            under_warranty BOOLEAN DEFAULT FALSE
+            status asset_status_enum,
+            under_warranty BOOLEAN
         );
         """
     )

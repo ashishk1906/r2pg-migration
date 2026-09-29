@@ -614,7 +614,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             END IF;
         END $$;
 
-        -- 2. ApplicationFormTemplates Table (Primary key only, no secondary indexes)
         CREATE TABLE IF NOT EXISTS application_form_templates (
             id UUID PRIMARY KEY,
             title VARCHAR(255),
@@ -632,7 +631,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_by UUID
         );
 
-        -- 3. Applications Table (Primary key only, no secondary indexes)
         CREATE TABLE IF NOT EXISTS applications (
             id UUID PRIMARY KEY,
             name VARCHAR(255),
@@ -642,7 +640,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             residential_status residential_status_enum,
             category applicant_category_enum,
             gender applicant_gender_enum,
-            -- Composite / Nested structures stored as JSONB
             address JSONB,
             hsc JSONB,
             ssc JSONB,
@@ -651,7 +648,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             guardian_details JSONB,
             applied_for JSONB,
             payment JSONB,
-            -- Upload S3 URLs
             photo_url TEXT,
             aadhar_url TEXT,
             hsc_marks_card_url TEXT,
@@ -661,7 +657,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             birth_certificate_url TEXT,
             transfer_certificate_url TEXT,
             leaving_certificate_url TEXT,
-            -- Template reference & Application lifecycle
             application_form_template_id UUID,
             submitted_on TIMESTAMPTZ,
             application_number INTEGER,
@@ -918,13 +913,6 @@ def main() -> int:
                     loaded_apps += 1
                     new_apps += int(res.inserted)
 
-        # Post-load verification counts
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM application_form_templates")
-            total_templates = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM applications")
-            total_applications = int(cur.fetchone()[0])
-
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
@@ -946,11 +934,6 @@ def main() -> int:
                 "new_templates_inserted": new_tpls,
                 "applications_processed": loaded_apps,
                 "new_applications_inserted": new_apps,
-            },
-            "post_load_counts": {
-                "application_form_templates": total_templates,
-                "applications": total_applications,
-            },
         }
 
         print("Migration completed.")

@@ -283,10 +283,6 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
         return None
 
 
-# -----------------------------------------------------------------------------
-# Enum Mappings (Exact match to C# Enums)
-# -----------------------------------------------------------------------------
-
 # ApplicationFormTemplateStatusEnum: Active = 1, Published = 70, Disabled = 99
 TEMPLATE_STATUS_MAP: Dict[Any, str] = {
     1: "Active",
@@ -298,15 +294,15 @@ TEMPLATE_STATUS_MAP: Dict[Any, str] = {
 }
 
 
-def map_template_status(val: Any) -> str:
-    if val is None:
-        return "Active"
+def map_template_status(val: Any) -> Optional[str]:
+    if val is None or val == "" or val == 0 or val == "0":
+        return None
     if isinstance(val, int):
-        return TEMPLATE_STATUS_MAP.get(val, "Active")
+        return TEMPLATE_STATUS_MAP.get(val, None)
     s = str(val).strip()
     if s.isdigit():
-        return TEMPLATE_STATUS_MAP.get(int(s), "Active")
-    return TEMPLATE_STATUS_MAP.get(s.lower(), "Active")
+        return TEMPLATE_STATUS_MAP.get(int(s), None)
+    return TEMPLATE_STATUS_MAP.get(s.lower(), s if s in {"Active", "Published", "Disabled"} else None)
 
 
 # ResidentialStatusEnum: Indian = 10, PIO_OCI = 20, NRI = 30
@@ -405,16 +401,16 @@ APPLICATION_STATUS_MAP: Dict[Any, str] = {
 }
 
 
-def map_application_status(val: Any) -> str:
-    if val is None:
-        return "WIP"
+def map_application_status(val: Any) -> Optional[str]:
+    if val is None or val == "" or val == 0 or val == "0":
+        return None
     if isinstance(val, int):
-        return APPLICATION_STATUS_MAP.get(val, "WIP")
+        return APPLICATION_STATUS_MAP.get(val, None)
     s = str(val).strip()
     if s.isdigit():
-        return APPLICATION_STATUS_MAP.get(int(s), "WIP")
+        return APPLICATION_STATUS_MAP.get(int(s), None)
     norm = s.lower().replace(" ", "").replace("_", "")
-    return APPLICATION_STATUS_MAP.get(norm, "WIP")
+    return APPLICATION_STATUS_MAP.get(norm, s if s in {"WIP", "Selected", "Submitted", "Shortlisted", "Admitted", "Rejected", "OptedIn", "OptedOut", "Declined"} else None)
 
 
 # -----------------------------------------------------------------------------
@@ -430,7 +426,7 @@ def extract_template_fields(doc: Dict[str, Any]) -> Tuple:
     if not tpl_id:
         raise ValueError(f"ApplicationFormTemplate missing valid UUID: {raw_id}")
 
-    title = clean_str(doc.get("Title"), 200)
+    title = clean_str(doc.get("Title"), 255)
     description = clean_str(doc.get("Description"))
     options = as_json(doc.get("Options"))
     start_date = parse_iso_timestamp(doc.get("StartDate"))
@@ -438,7 +434,7 @@ def extract_template_fields(doc: Dict[str, Any]) -> Tuple:
     status = map_template_status(doc.get("Status"))
 
     shortlists_raw = doc.get("Shortlists")
-    shortlists = as_json(shortlists_raw if isinstance(shortlists_raw, list) else [])
+    shortlists = as_json(shortlists_raw) if isinstance(shortlists_raw, list) else None
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -476,9 +472,9 @@ def extract_application_fields(doc: Dict[str, Any]) -> Tuple:
     if not app_id:
         raise ValueError(f"Application missing valid UUID: {raw_id}")
 
-    name = clean_str(doc.get("Name"), 150)
-    email = clean_str(doc.get("Email"), 254)
-    mobile = clean_str(doc.get("Mobile"), 20)
+    name = clean_str(doc.get("Name"), 255)
+    email = clean_str(doc.get("Email"), 255)
+    mobile = clean_str(doc.get("Mobile"), 50)
     dob = parse_iso_timestamp(doc.get("DOB"))
     residential_status = map_residential_status(doc.get("ResidentialStatus"))
     category = map_category(doc.get("Category"))

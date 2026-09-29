@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 import json
 import os
 from pathlib import Path
@@ -318,15 +319,15 @@ TAG_STATUS_MAP: Dict[Any, str] = {
 }
 
 
-def map_tag_status(val: Any) -> str:
-    if val is None:
-        return "Active"
+def map_tag_status(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
     if isinstance(val, int):
-        return TAG_STATUS_MAP.get(val, "Active")
+        return TAG_STATUS_MAP.get(val, None)
     s = str(val).strip()
     if s.isdigit():
-        return TAG_STATUS_MAP.get(int(s), "Active")
-    return TAG_STATUS_MAP.get(s.lower(), "Active")
+        return TAG_STATUS_MAP.get(int(s), None)
+    return TAG_STATUS_MAP.get(s.lower(), s if s in {"Unknown", "Active", "Disabled"} else None)
 
 
 # AssessmentStatusEnum: Unknown=0, Active=1, WIP=40, Published=50, Archived=80, Disabled=99
@@ -348,16 +349,16 @@ ASSESSMENT_STATUS_MAP: Dict[Any, str] = {
 }
 
 
-def map_assessment_status(val: Any) -> str:
-    if val is None:
-        return "Active"
+def map_assessment_status(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
     if isinstance(val, int):
-        return ASSESSMENT_STATUS_MAP.get(val, "Active")
+        return ASSESSMENT_STATUS_MAP.get(val, None)
     s = str(val).strip()
     if s.isdigit():
-        return ASSESSMENT_STATUS_MAP.get(int(s), "Active")
+        return ASSESSMENT_STATUS_MAP.get(int(s), None)
     norm = s.lower().replace(" ", "").replace("_", "")
-    return ASSESSMENT_STATUS_MAP.get(norm, "Active")
+    return ASSESSMENT_STATUS_MAP.get(norm, s if s in {"Unknown", "Active", "WIP", "Published", "Archived", "Disabled"} else None)
 
 
 # -----------------------------------------------------------------------------
@@ -376,7 +377,7 @@ def extract_tag_fields(doc: Dict[str, Any]) -> Tuple:
     name = clean_str(doc.get("Name"), 150)
     predefined = clean_bool(doc.get("Predefined"))
     csn = clean_str(doc.get("CSN"), 100)
-    meta = as_json(doc.get("Meta") or {})
+    meta = as_json(doc.get("Meta")) if doc.get("Meta") is not None else None
     status = map_tag_status(doc.get("Status"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
@@ -412,13 +413,15 @@ def extract_assessment_fields(doc: Dict[str, Any]) -> Tuple:
     if not art_id:
         raise ValueError(f"Assessment missing valid UUID: {raw_id}")
 
-    total_marks = clean_int(doc.get("TotalMarks"))
+    raw_tm = doc.get("TotalMarks")
+    total_marks = Decimal(str(raw_tm)) if raw_tm is not None else None
     description = clean_str(doc.get("Description"))
     subject = clean_str(doc.get("Subject"), 150)
     subject_code = clean_str(doc.get("SubjectCode"), 50)
     duration = clean_int(doc.get("Duration"))
 
-    sections = as_json(doc.get("Sections") if isinstance(doc.get("Sections"), list) else [])
+    raw_sections = doc.get("Sections")
+    sections = as_json(raw_sections) if isinstance(raw_sections, list) else None
     status = map_assessment_status(doc.get("Status"))
     multiple_attempts = clean_bool(doc.get("MultipleAttempts"))
     tags = clean_string_list(doc.get("Tags"))
@@ -461,7 +464,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     """Create target enums, assessment_tags and assessments tables."""
     cur.execute(
         """
-        -- 1. Create Enums
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tag_status_enum') THEN
@@ -483,37 +485,35 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             END IF;
         END $$;
 
-        -- 2. AssessmentTags Table (No secondary indexes)
         CREATE TABLE IF NOT EXISTS assessment_tags (
             id UUID PRIMARY KEY,
             name VARCHAR(150),
-            predefined BOOLEAN DEFAULT FALSE,
+            predefined BOOLEAN,
             csn VARCHAR(100),
-            meta JSONB DEFAULT '{}'::jsonb,
-            status tag_status_enum NOT NULL DEFAULT 'Active',
+            meta JSONB,
+            status tag_status_enum,
             owner_id UUID,
             parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
+            created_on TIMESTAMPTZ,
             created_by UUID,
             modified_on TIMESTAMPTZ,
             modified_by UUID
         );
 
-        -- 3. Assessments Table (No secondary indexes)
         CREATE TABLE IF NOT EXISTS assessments (
             id UUID PRIMARY KEY,
-            total_marks INT,
+            total_marks NUMERIC(14, 2),
             description TEXT,
             subject VARCHAR(150),
             subject_code VARCHAR(50),
             duration INT,
-            sections JSONB DEFAULT '[]'::jsonb,
-            status assessment_status_enum NOT NULL DEFAULT 'Active',
-            multiple_attempts BOOLEAN DEFAULT FALSE,
-            tags TEXT[] DEFAULT '{}'::text[],
+            sections JSONB,
+            status assessment_status_enum,
+            multiple_attempts BOOLEAN,
+            tags TEXT[],
             owner_id UUID,
             parent_id UUID,
-            created_on TIMESTAMPTZ NOT NULL,
+            created_on TIMESTAMPTZ,
             created_by UUID,
             modified_on TIMESTAMPTZ,
             modified_by UUID
@@ -726,13 +726,6 @@ def main() -> int:
                     loaded_ass += 1
                     new_ass += int(res.inserted)
 
-        # Post-load verification counts
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM assessment_tags")
-            total_tags = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM assessments")
-            total_assessments = int(cur.fetchone()[0])
-
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
@@ -754,10 +747,6 @@ def main() -> int:
                 "new_tags_inserted": new_tags,
                 "assessments_processed": loaded_ass,
                 "new_assessments_inserted": new_ass,
-            },
-            "post_load_counts": {
-                "assessment_tags": total_tags,
-                "assessments": total_assessments,
             },
         }
 

@@ -765,3 +765,423 @@ All three tables share the same Common Commit Wrapper schema:
 | `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
 
 ---
+
+## institute_calendars
+
+**Script:** `institute_calendars_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `InstituteCalendars`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `calendar_event_category_enum` | `Event`, `Holiday`, `WeeklyHoliday`, `Exam` | `CalendarEventCategoryEnum` | `Event` = 10, `Holiday` = 20, `WeeklyHoliday` = 30, `Exam` = 40 |
+
+---
+
+### Table: `institute_calendars`
+
+**PostgreSQL Table:** `institute_calendars`  
+**RavenDB Source:** `InstituteCalendars` (C# `InstituteCalendar : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `inst_id` | `InstId` | `string` (UUID) | `UUID` |
+| `event_name` | `EventName` | `string` | `VARCHAR(255)` |
+| `event_category` | `EventCategory` | `CalendarEventCategoryEnum` | `calendar_event_category_enum` |
+| `event_category_as_string` | `EventCategoryAsString` | `string` | `VARCHAR(100)` |
+| `priority` | `Priority` | `int` | `INTEGER` |
+| `audience` | `Audience` | `List<string>` | `TEXT[]` |
+| `conducted_by` | `ConductedBy` | `List<string>` | `TEXT[]` |
+| `event_dates` | `EventDates` | `List<Event>` | `JSONB` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+## inventory
+
+**Script:** `inventory_ravendb_to_postgres_migrate.py`  
+**RavenDB Collections:** `InventoryItemViews`, `InventoryJournalViews`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `inventory_status_enum` | `Active`, `Disabled` | `InventoryItemStatusEnum` | `Active` = 1, `Disabled` = 99 |
+| `inventory_type_enum` | `Item`, `Group` | `InventoryTypeEnum` | `Item` = 1, `Group` = 2 |
+| `journal_entry_type_enum` | `Dr`, `Cr` | `JournalEntryTypeEnum` | `Dr` = 10, `Cr` = 20 |
+
+---
+
+### Table: `inventory_item_views`
+
+**PostgreSQL Table:** `inventory_item_views`  
+**RavenDB Source:** `InventoryItemViews` (C# `InventoryItemView : IReadModelAccounting`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `name` | `Name` | `string` | `VARCHAR(255)` |
+| `group_id` | `GroupId` | `string` (UUID) | `UUID` |
+| `inventory_type` | `InventoryType` | `InventoryTypeEnum` | `inventory_type_enum` |
+| `uom` | `UOM` | `string` | `VARCHAR(50)` |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `tags` | `Tags` | `List<string>` | `TEXT[]` |
+| `attributes` | `Attributes` | `Dictionary<string, object>` | `JSONB` |
+| `status` | `Status` | `InventoryItemStatusEnum` | `inventory_status_enum` |
+
+---
+
+### Table: `inventory_journal_views`
+
+**PostgreSQL Table:** `inventory_journal_views`  
+**RavenDB Source:** `InventoryJournalViews` (C# `InventoryJournalView : IReadModelAccounting`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `inventory_item_id` | `InventoryItemId` | `string` (UUID) | `UUID` |
+| `name` | `Name` | `string` | `VARCHAR(255)` |
+| `date` | `Date` | `DateTime` | `TIMESTAMPTZ` |
+| `uom` | `UOM` | `string` | `VARCHAR(50)` |
+| `quantity` | `Quantity` | `decimal` | `NUMERIC(18, 4)` |
+| `rate` | `Rate` | `decimal` | `NUMERIC(18, 2)` |
+| `particulars` | `Particulars` | `string` | `TEXT` |
+| `reference` | `Reference` | `string` | `VARCHAR(255)` |
+| `inventory_journal_id` | `InventoryJournalId` | `string` (UUID) | `UUID` |
+| `accounting_journal_id` | `AccountingJournalId` | `string` (UUID) | `UUID` |
+| `party_id` | `PartyId` | `string` (UUID) | `UUID` |
+| `party_name` | `PartyName` | `string` | `VARCHAR(255)` |
+| `journal_entry_type` | `JournalEntryType` | `JournalEntryTypeEnum` | `journal_entry_type_enum` |
+| `status` | `Status` | `InventoryJournalStatusEnum` | `inventory_status_enum` |
+
+---
+
+## ledger_account_views
+
+**Script:** `ledger_account_views_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `LedgerAccountViews`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `ledger_account_status_enum` | `Active`, `Disabled` | `LedgerStatusEnum` | `Active` = 1, `Disabled` = 99 |
+| `nature_of_accounts_enum` | `Inherit`, `Assets`, `Liabilities`, `Income`, `Expenses` | `NatureOfAccountsEnum` | `Inherit` = 0, `Assets` = 10, `Liabilities` = 20, `Income` = 30, `Expenses` = 40 |
+| `ledger_type_enum` | `Ledger`, `Group` | `LedgerTypeEnum` | `Ledger` = 1, `Group` = 2 |
+| `ledger_owner_type_enum` | `Org`, `Inst` | `LedgerOwnerTypeEnum` | `Org` = 1, `Inst` = 2 |
+
+---
+
+### Table: `ledger_account_views`
+
+**PostgreSQL Table:** `ledger_account_views`  
+**RavenDB Source:** `LedgerAccountViews` (C# `LedgerAccountView : IReadModelAccounting`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `name` | `Name` | `string` | `VARCHAR(255)` |
+| `group_id` | `GroupId` | `string` (UUID) | `UUID` |
+| `group_name` | `GroupName` | `string` | `VARCHAR(255)` |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `owner_name` | `OwnerName` | `string` | `VARCHAR(255)` |
+| `owner_type` | `OwnerType` | `LedgerOwnerTypeEnum` | `ledger_owner_type_enum` |
+| `ledger_type` | `LedgerType` | `LedgerTypeEnum` | `ledger_type_enum` |
+| `nature_of_accounts` | `NatureOfAccounts` | `NatureOfAccountsEnum` | `nature_of_accounts_enum` |
+| `status` | `Status` | `LedgerStatusEnum` | `ledger_account_status_enum` |
+
+---
+## material_views
+
+**Script:** `material_views_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `MaterialViews`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `material_status_enum` | `Active`, `Reserved`, `Issued`, `UnderMaintenance`, `OutOfCirculation`, `Disabled` | `MaterialStatusEnum` | `Active` = 1, `Reserved` = 5, `Issued` = 10, `UnderMaintenance` = 20, `OutOfCirculation` = 90, `Disabled` = 99 |
+
+---
+
+### Table: `material_views`
+
+**PostgreSQL Table:** `material_views`  
+**RavenDB Source:** `MaterialViews` (C# `MaterialView : IReadModelLibrary`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `tracking_id` | `TrackingId` | `string` | `VARCHAR(100)` |
+| `isbn` | `ISBN` | `string` | `VARCHAR(100)` |
+| `title` | `Title` | `string` | `TEXT` |
+| `author` | `Author` | `string` | `VARCHAR(255)` |
+| `publisher` | `Publisher` | `string` | `VARCHAR(255)` |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `ownership` | `OwnerShip` | `List<Owner>` | `JSONB` |
+| `location` | `Location` | `string` | `VARCHAR(255)` |
+| `attributes` | `Attributes` | `Dictionary<string, object>` | `JSONB` |
+| `tags` | `Tags` | `List<string>` | `TEXT[]` |
+| `value` | `Value` | `decimal` | `NUMERIC(18, 2)` |
+| `status` | `Status` | `MaterialStatusEnum` | `material_status_enum` |
+| `last_verified_on` | `LastVerifiedOn` | `long` | `BIGINT` |
+| `pages` | `Pages` | `int` | `INTEGER` |
+
+
+---
+
+## member_views
+
+**Script:** `member_views_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `MemberViews`  
+
+### Enums
+
+*None.*
+
+---
+
+### Table: `member_views`
+
+**PostgreSQL Table:** `member_views`  
+**RavenDB Source:** `MemberViews` (C# `MemberView : IReadModelLibrary`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `membership_id` | `MembershipId` | `string` | `VARCHAR(100)` |
+| `member_type` | `MemberType` | `string` | `VARCHAR(50)` |
+| `issued_books` | `IssuedBooks` | `List<string>` | `TEXT[]` |
+
+
+---
+
+## personas
+
+**Script:** `personas_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `Personas`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `persona_type_enum` | `0`, `Anon`, `Management`, `Parent`, `Staff`, `Student`, `External`, `Dev`, `35`, `60`, `70` | `PersonaTypeEnum` | `Anon` = 10, `Management` = 20, `Parent` = 30, `Staff` = 40, `Student` = 50, `External` = 80, `Dev` = 90 |
+| `persona_status_enum` | `Unknown`, `Active`, `Disabled` | `PersonaStatusEnum` | `Unknown` = -1, `Active` = 1, `Disabled` = 99 |
+
+---
+
+### Table: `persona`
+
+**PostgreSQL Table:** `persona`  
+**RavenDB Source:** `Personas` (C# `Persona : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `title` | `Title` | `string` | `VARCHAR(200)` |
+| `display_text` | `DisplayText` | `string` | `VARCHAR(200)` |
+| `persona_type` | `PersonaType` | `PersonaTypeEnum` | `persona_type_enum` |
+| `persona_type_as_string` | `PersonaTypeAsString` | `string` | `VARCHAR(64)` |
+| `scope` | `Scope` | `List<string>` | `TEXT[]` |
+| `named_scope` | `NamedScope` | `List<string>` | `TEXT[]` |
+| `status` | `Status` | `PersonaStatusEnum` | `persona_status_enum` |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` | `DateTime?` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` | `string` (UUID) | `UUID` |
+
+
+---
+## questions
+
+**Script:** `questions_ravendb_to_postgres_migrate.py`  
+**RavenDB Collections:** `QATags`, `Questions`, `RandomQuestionSubmissions`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `qa_tag_status_enum` | `Unknown`, `Active`, `Disabled` | `TagStatusEnum` | `Unknown` = 0, `Active` = 1, `Disabled` = 99 |
+| `question_status_enum` | `unknown`, `active`, `disabled`, `published`, `wip`, `archived` | `QuestionStatusEnum` | `unknown` = 0, `active` = 1, `disabled` = 99, `published` = 50, `wip` = 40, `archived` = 80 |
+| `question_answer_type_enum` | `Text`, `OneOf`, `ManyOf` | `AnswerEnum` | `Text` = 1, `OneOf` = 2, `ManyOf` = 3 |
+| `question_difficulty_enum` | `low`, `medium`, `high` | `DifficultyEnum` | `low` = 10, `medium` = 20, `high` = 30 |
+
+---
+
+### Table: `qa_tags`
+
+**PostgreSQL Table:** `qa_tags`  
+**RavenDB Source:** `QATags` (C# `QATag : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `name` | `Name` | `string` | `VARCHAR(255)` |
+| `predefined` | `Predefined` | `bool` | `BOOLEAN` |
+| `csn` | `CSN` | `string` | `VARCHAR(50)` |
+| `meta` | `Meta` | `Dictionary<string, string>` | `JSONB` |
+| `status` | `Status` | `TagStatusEnum` | `qa_tag_status_enum` |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` | `string` (UUID) | `UUID` |
+
+---
+
+### Table: `questions`
+
+**PostgreSQL Table:** `questions`  
+**RavenDB Source:** `Questions` (C# `Question : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `question_text` | `QuestionText` | `string` | `TEXT` |
+| `plain_text` | `PlainText` | `string` | `TEXT` |
+| `html_text` | `HtmlText` | `string` | `TEXT` |
+| `tag_list` | `TagList` | `List<string>` | `TEXT[]` |
+| `options` | `Options` | `List<Option>` | `JSONB` |
+| `meta` | `Meta` | `Dictionary<string, string>` | `JSONB` |
+| `status` | `Status` | `QuestionStatusEnum` | `question_status_enum` |
+| `answer_type` | `AnswerType` | `AnswerEnum` | `question_answer_type_enum` |
+| `hints` | `Hints` | `List<Hint>` | `JSONB` |
+| `instruction` | `Instruction` | `string` | `TEXT` |
+| `default_weightage` | `DefaultWeightage` | `decimal` | `NUMERIC(10, 2)` |
+| `questions` | `Questions` | `List<SubQuestion>` | `JSONB` |
+| `difficulty` | `Difficulty` | `DifficultyEnum` | `question_difficulty_enum` |
+| `keywords` | `Keywords` | `List<string>` | `TEXT[]` |
+| `isn` | `ISN` | `string` | `VARCHAR(50)` |
+| `answer_text` | `AnswerText` | `string` | `TEXT` |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` | `string` (UUID) | `UUID` |
+
+---
+
+### Table: `random_question_submissions`
+
+**PostgreSQL Table:** `random_question_submissions`  
+**RavenDB Source:** `RandomQuestionSubmissions` (C# `RandomQuestionSubmission : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `user_id` | `UserId` | `string` (UUID) | `UUID` |
+| `user_email` | `UserEmail` | `string` | `VARCHAR(255)` |
+| `questions_answered` | `QuestionsAnswered` | `List<RandomQuestionResult>` | `JSONB` |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` | `string` (UUID) | `UUID` |
+
+---
+
+## receipts
+
+**Script:** `receipts_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `Receipts`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `receipt_payment_mode_enum` | `Cash`, `Cheque`, `DD`, `Netbanking`, `UPI` | `PaymentModeEnum` | `Cash` = 10, `Cheque` = 20, `DD` = 30, `Netbanking` = 40, `UPI` = 50 |
+| `receipt_status_enum` | `Active`, `Cancelled` | `ReceiptStatusEnum` | `Active` = 1, `Cancelled` = 99 |
+| `receipt_type_enum` | `Unknown`, `Regular`, `Donation` | `ReceiptTypeEnum` | `Unknown` = 0, `Regular` = 10, `Donation` = 20 |
+
+---
+
+### Table: `receipts`
+
+**PostgreSQL Table:** `receipts`  
+**RavenDB Source:** `Receipts` (C# `Receipt : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `number` | `Number` | `string` | `VARCHAR(50)` |
+| `inst_id` | `InstId` | `string` (UUID) | `UUID` |
+| `date` | `Date` | `DateTime` | `TIMESTAMPTZ` |
+| `customer` | `Customer` | `Customer` | `JSONB` |
+| `order_items` | `OrderItems` | `List<OrderItem>` | `JSONB` |
+| `total_amount` | `TotalAmount` | `decimal` | `NUMERIC(18, 2)` |
+| `received_by` | `ReceivedBy` | `string` | `VARCHAR(150)` |
+| `payment_mode` | `PaymentMode` | `PaymentModeEnum` | `receipt_payment_mode_enum` |
+| `financial_instrument` | `FinancialInstrument` | `FinancialInstrument` | `JSONB` |
+| `status` | `Status` | `ReceiptStatusEnum` | `receipt_status_enum` |
+| `receipt_type` | `ReceiptType` | `ReceiptTypeEnum` | `receipt_type_enum` |
+| `revenue_sharing_enabled` | `RevenueSharingEnabled` | `bool` | `BOOLEAN` |
+| `revenue_share` | `RevenueShare` | `int` | `INTEGER` |
+| `meta` | `Meta` | `Meta` | `JSONB` |
+| `html` | `HTML` | `string` | `TEXT` |
+| `ref_no` | `RefNo` | `string` | `VARCHAR(100)` |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` | `string` (UUID) | `UUID` |
+
+---
+
+## seat_matrices
+
+**Script:** `seat_matrices_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `SeatMatrices`  
+
+### Enums
+
+*None.*
+
+---
+
+### Table: `seat_matrices`
+
+**PostgreSQL Table:** `seat_matrices`  
+**RavenDB Source:** `SeatMatrices` (C# `SeatMatrix : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `course_id` | `CourseId` | `string` (UUID) | `UUID` |
+| `course` | `Course` | `string` | `VARCHAR(255)` |
+| `total_seats` | `TotalSeats` | `int` | `INTEGER` |
+| `break_up` | `BreakUp` | `List<SeatBreakUp>` | `JSONB` |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` | `string` (UUID) | `UUID` |
+
+---

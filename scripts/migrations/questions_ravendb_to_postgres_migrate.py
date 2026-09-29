@@ -248,7 +248,7 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any, default: bool = False) -> bool:
+def clean_bool(val: Any, default: Optional[bool] = None) -> Optional[bool]:
     if val is None:
         return default
     if isinstance(val, bool):
@@ -271,22 +271,29 @@ def clean_decimal(val: Any, default: Optional[Decimal] = None) -> Optional[Decim
         return default
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Convert raw value to list of strings for TEXT[], preserving None as SQL NULL."""
     if raw_val is None:
-        return []
+        return None
     if isinstance(raw_val, list):
-        return [str(item).strip() for item in raw_val if str(item).strip()]
+        cleaned = [
+            str(item).strip()
+            for item in raw_val
+            if item is not None and str(item).strip()
+        ]
+        return cleaned if cleaned else None
     if isinstance(raw_val, str):
         cleaned = raw_val.strip()
-        return [cleaned] if cleaned else []
+        return [cleaned] if cleaned else None
     return [str(raw_val)]
 
 
-def clean_sub_questions(raw_val: Any) -> List[Dict[str, Any]]:
+def clean_sub_questions(raw_val: Any) -> Optional[List[Dict[str, Any]]]:
     """Clean sub-questions ensuring DefaultWeightage is valid decimal/float in JSONB."""
+    if raw_val is None:
+        return None
     if not isinstance(raw_val, list):
-        return []
+        return None
     cleaned_list = []
     for item in raw_val:
         if isinstance(item, dict):
@@ -297,13 +304,13 @@ def clean_sub_questions(raw_val: Any) -> List[Dict[str, Any]]:
                 except (ValueError, TypeError):
                     pass
             cleaned_list.append(cleaned_item)
-    return cleaned_list
+    return cleaned_list if cleaned_list else None
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -451,9 +458,9 @@ def extract_qa_tag_fields(doc: Dict[str, Any]) -> Tuple:
         raise ValueError(f"QATag missing valid ID: {raw_id}")
 
     name = clean_str(doc.get("Name"), 255)
-    predefined = clean_bool(doc.get("Predefined"), default=False)
+    predefined = clean_bool(doc.get("Predefined"))
     csn = clean_str(doc.get("CSN"), 50)
-    meta = as_json(doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {}, default_val={})
+    meta = as_json(doc.get("Meta"))
     status = map_qa_tag_status(doc.get("Status"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
@@ -496,14 +503,14 @@ def extract_question_fields(doc: Dict[str, Any]) -> Tuple:
     html_text = clean_str(doc.get("HtmlText"))
     tag_list = clean_string_list(doc.get("TagList"))
 
-    options = as_json(doc.get("Options") if isinstance(doc.get("Options"), list) else [], default_val=[])
-    meta = as_json(doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {}, default_val={})
+    options = as_json(doc.get("Options"))
+    meta = as_json(doc.get("Meta"))
     status = map_question_status(doc.get("Status"))
     answer_type = map_question_answer_type(doc.get("AnswerType"))
-    hints = as_json(doc.get("Hints") if isinstance(doc.get("Hints"), list) else [], default_val=[])
+    hints = as_json(doc.get("Hints"))
     instruction = clean_str(doc.get("Instruction"))
     default_weightage = clean_decimal(doc.get("DefaultWeightage"))
-    sub_questions = as_json(clean_sub_questions(doc.get("Questions")), default_val=[])
+    sub_questions = as_json(clean_sub_questions(doc.get("Questions")))
     difficulty = map_question_difficulty(doc.get("Difficulty"))
     keywords = clean_string_list(doc.get("Keywords"))
     isn = clean_str(doc.get("ISN"), 50)
@@ -557,10 +564,7 @@ def extract_random_question_submission_fields(doc: Dict[str, Any]) -> Tuple:
 
     user_id = clean_uuid(doc.get("UserId"))
     user_email = clean_str(doc.get("UserEmail"), 255)
-    questions_answered = as_json(
-        doc.get("QuestionsAnswered") if isinstance(doc.get("QuestionsAnswered"), list) else [],
-        default_val=[],
-    )
+    questions_answered = as_json(doc.get("QuestionsAnswered"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -637,9 +641,9 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         CREATE TABLE IF NOT EXISTS qa_tags (
             id UUID PRIMARY KEY,
             name VARCHAR(255),
-            predefined BOOLEAN DEFAULT FALSE,
+            predefined BOOLEAN,
             csn VARCHAR(50),
-            meta JSONB DEFAULT '{}'::jsonb,
+            meta JSONB,
             status qa_tag_status_enum,
             owner_id UUID,
             parent_id UUID,
@@ -654,17 +658,17 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             question_text TEXT,
             plain_text TEXT,
             html_text TEXT,
-            tag_list TEXT[] DEFAULT '{}'::text[],
-            options JSONB DEFAULT '[]'::jsonb,
-            meta JSONB DEFAULT '{}'::jsonb,
+            tag_list TEXT[],
+            options JSONB,
+            meta JSONB,
             status question_status_enum,
             answer_type question_answer_type_enum,
-            hints JSONB DEFAULT '[]'::jsonb,
+            hints JSONB,
             instruction TEXT,
             default_weightage NUMERIC(10, 2),
-            questions JSONB DEFAULT '[]'::jsonb,
+            questions JSONB,
             difficulty question_difficulty_enum,
-            keywords TEXT[] DEFAULT '{}'::text[],
+            keywords TEXT[],
             isn VARCHAR(50),
             answer_text TEXT,
             owner_id UUID,
@@ -679,7 +683,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             id UUID PRIMARY KEY,
             user_id UUID,
             user_email VARCHAR(255),
-            questions_answered JSONB DEFAULT '[]'::jsonb,
+            questions_answered JSONB,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,

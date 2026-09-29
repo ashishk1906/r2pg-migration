@@ -229,7 +229,7 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_int(val: Any, default: Optional[int] = 0) -> Optional[int]:
+def clean_int(val: Any, default: Optional[int] = None) -> Optional[int]:
     if val is None:
         return default
     try:
@@ -344,16 +344,14 @@ def extract_institute_calendar_fields(doc: Dict[str, Any]) -> Tuple:
     event_name = clean_str(doc.get("EventName"), 255)
     event_category = map_calendar_event_category(doc.get("EventCategory"))
     event_category_as_string = clean_str(doc.get("EventCategoryAsString"), 100) or event_category
-    priority = clean_int(doc.get("Priority"), default=0)
+    priority = clean_int(doc.get("Priority"))
 
     # Audience and ConductedBy are List<string> in C# InstituteCalendar, stored as nullable TEXT[]
     audience = clean_string_list(doc.get("Audience"))
     conducted_by = clean_string_list(doc.get("ConductedBy"))
 
     raw_dates = doc.get("EventDates")
-    event_dates = as_json(
-        raw_dates if isinstance(raw_dates, list) else [], default_val=[]
-    )
+    event_dates = as_json(raw_dates) if raw_dates is not None else None
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -411,10 +409,10 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             event_name VARCHAR(255),
             event_category calendar_event_category_enum,
             event_category_as_string VARCHAR(100),
-            priority INTEGER DEFAULT 0,
+            priority INTEGER,
             audience TEXT[],
             conducted_by TEXT[],
-            event_dates JSONB DEFAULT '[]'::jsonb,
+            event_dates JSONB,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ,

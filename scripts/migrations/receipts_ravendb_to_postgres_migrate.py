@@ -230,7 +230,7 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any, default: bool = False) -> bool:
+def clean_bool(val: Any, default: Optional[bool] = None) -> Optional[bool]:
     if val is None:
         return default
     if isinstance(val, bool):
@@ -262,10 +262,10 @@ def clean_decimal(val: Any, default: Optional[Decimal] = None) -> Optional[Decim
         return default
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -395,23 +395,23 @@ def extract_receipt_fields(doc: Dict[str, Any]) -> Tuple:
     inst_id = clean_uuid(doc.get("InstId"))
     date_val = parse_iso_timestamp(doc.get("Date"))
 
-    customer = as_json(doc.get("Customer") if isinstance(doc.get("Customer"), dict) else {}, default_val={})
-    order_items = as_json(doc.get("OrderItems") if isinstance(doc.get("OrderItems"), list) else [], default_val=[])
+    customer = as_json(doc.get("Customer"))
+    order_items = as_json(doc.get("OrderItems"))
 
     total_amount = clean_decimal(doc.get("TotalAmount"))
     received_by = clean_str(doc.get("ReceivedBy"), 150)
     payment_mode = map_payment_mode(doc.get("PaymentMode"))
 
     fin_inst = doc.get("FinancialInstrument")
-    financial_instrument = as_json(fin_inst) if fin_inst is not None else None
+    financial_instrument = as_json(fin_inst)
 
     status = map_receipt_status(doc.get("Status"))
     receipt_type = map_receipt_type(doc.get("ReceiptType"))
-    revenue_sharing_enabled = clean_bool(doc.get("RevenueSharingEnabled"), default=False)
+    revenue_sharing_enabled = clean_bool(doc.get("RevenueSharingEnabled"))
     # In .NET ct.gr Receipt.cs: public int RevenueShare { get; set; }
     revenue_share = clean_int(doc.get("RevenueShare"))
 
-    meta = as_json(doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {}, default_val={})
+    meta = as_json(doc.get("Meta"))
     html = clean_str(doc.get("HTML"))
     # In .NET ct.gr Receipt.cs: public string RefNo { get; set; }
     ref_no = clean_str(doc.get("RefNo"), 100)
@@ -496,17 +496,17 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             number VARCHAR(50),
             inst_id UUID,
             date TIMESTAMPTZ,
-            customer JSONB DEFAULT '{}'::jsonb,
-            order_items JSONB DEFAULT '[]'::jsonb,
+            customer JSONB,
+            order_items JSONB,
             total_amount NUMERIC(18, 2),
             received_by VARCHAR(150),
             payment_mode receipt_payment_mode_enum,
             financial_instrument JSONB,
             status receipt_status_enum,
             receipt_type receipt_type_enum,
-            revenue_sharing_enabled BOOLEAN DEFAULT FALSE,
+            revenue_sharing_enabled BOOLEAN,
             revenue_share INTEGER,
-            meta JSONB DEFAULT '{}'::jsonb,
+            meta JSONB,
             html TEXT,
             ref_no VARCHAR(100),
             owner_id UUID,

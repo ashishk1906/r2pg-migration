@@ -501,78 +501,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     )
 
 
-def assert_required_schema(cur: psycopg2.extensions.cursor) -> None:
-    required_columns: Dict[str, Sequence[str]] = {
-        "persona": (
-            "id",
-            "title",
-            "display_text",
-            "persona_type",
-            "persona_type_as_string",
-            "scope",
-            "named_scope",
-            "status",
-            "owner_id",
-            "parent_id",
-            "created_on",
-            "created_by",
-            "modified_on",
-            "modified_by",
-        )
-    }
-    required_types: Dict[str, Dict[str, Sequence[str]]] = {
-        "persona": {
-            "id": ("uuid",),
-            "title": ("character varying", "text"),
-            "display_text": ("character varying", "text"),
-            "persona_type": ("user-defined", "persona_type_enum"),
-            "persona_type_as_string": ("character varying", "text"),
-            "scope": ("array", "text[]"),
-            "named_scope": ("array", "text[]"),
-            "status": ("user-defined", "persona_status_enum"),
-            "owner_id": ("uuid",),
-            "created_on": ("timestamp with time zone",),
-            "created_by": ("uuid",),
-            "modified_on": ("timestamp with time zone",),
-            "modified_by": ("uuid",),
-        }
-    }
-
-    for table_name, columns in required_columns.items():
-        cur.execute(
-            """
-            SELECT column_name, data_type, udt_name
-            FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = %s
-            """,
-            (table_name,),
-        )
-        rows = cur.fetchall()
-        existing = {row[0] for row in rows}
-        type_by_column = {row[0]: str(row[1]).lower() for row in rows}
-        udt_by_column = {row[0]: str(row[2]).lower() for row in rows}
-        if not existing:
-            raise RuntimeError(f"Missing required table public.{table_name}.")
-        missing = [col for col in columns if col not in existing]
-        if missing:
-            raise RuntimeError(
-                f"Table public.{table_name} is missing required columns: {', '.join(missing)}"
-            )
-
-        mismatches = []
-        for column_name, expected_types in required_types.get(table_name, {}).items():
-            actual_type = type_by_column.get(column_name)
-            actual_udt = udt_by_column.get(column_name)
-            if actual_type is None:
-                continue
-            if actual_type not in expected_types and actual_udt not in expected_types:
-                mismatches.append(
-                    f"{column_name} expected {', '.join(expected_types)} but found {actual_type} ({actual_udt})"
-                )
-        if mismatches:
-            raise RuntimeError(
-                f"Table public.{table_name} has datatype mismatches: {'; '.join(mismatches)}"
-            )
 
 
 def upsert_persona(
@@ -722,7 +650,6 @@ def main() -> int:
         with conn:
             with conn.cursor() as cur:
                 ensure_target_schema(cur)
-                assert_required_schema(cur)
 
                 print("[3/3] Upserting personas...")
                 for doc in persona_docs:

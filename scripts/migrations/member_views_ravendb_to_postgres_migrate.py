@@ -257,12 +257,17 @@ def extract_member_view_fields(doc: Dict[str, Any]) -> Tuple:
     membership_id = clean_str(doc.get("MembershipId"), 100)
     member_type = clean_str(doc.get("MemberType"), 50)
     raw_issued = doc.get("IssuedBooks")
-    if isinstance(raw_issued, list):
-        issued_books = [str(x).strip() for x in raw_issued if x is not None and str(x).strip()]
+    if raw_issued is None:
+        issued_books = None
+    elif isinstance(raw_issued, list):
+        cleaned = [
+            str(x).strip() for x in raw_issued if x is not None and str(x).strip()
+        ]
+        issued_books = cleaned if cleaned else None
     elif isinstance(raw_issued, str) and raw_issued.strip():
         issued_books = [raw_issued.strip()]
     else:
-        issued_books = []
+        issued_books = None
 
     return (
         member_view_id,
@@ -287,7 +292,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             owner_id UUID,
             membership_id VARCHAR(100),
             member_type VARCHAR(50),
-            issued_books TEXT[] DEFAULT '{}'
+            issued_books TEXT[]
         );
         """
     )

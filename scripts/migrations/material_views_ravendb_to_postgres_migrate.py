@@ -247,7 +247,7 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
 
 
 def clean_decimal(
-    val: Any, default: Optional[Decimal] = Decimal("0.00")
+    val: Any, default: Optional[Decimal] = None
 ) -> Optional[Decimal]:
     if val is None:
         return default
@@ -257,7 +257,7 @@ def clean_decimal(
         return default
 
 
-def clean_int(val: Any, default: Optional[int] = 0) -> Optional[int]:
+def clean_int(val: Any, default: Optional[int] = None) -> Optional[int]:
     if val is None:
         return default
     try:
@@ -289,15 +289,20 @@ def clean_epoch_ms(val: Any) -> Optional[int]:
     return None
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Convert raw value to list of strings for TEXT[], preserving None as SQL NULL."""
     if raw_val is None:
-        return []
+        return None
     if isinstance(raw_val, list):
-        return [str(item).strip() for item in raw_val if str(item).strip()]
+        cleaned = [
+            str(item).strip()
+            for item in raw_val
+            if item is not None and str(item).strip()
+        ]
+        return cleaned if cleaned else None
     if isinstance(raw_val, str):
         cleaned = raw_val.strip()
-        return [cleaned] if cleaned else []
+        return [cleaned] if cleaned else None
     return [str(raw_val)]
 
 
@@ -314,10 +319,10 @@ def map_material_status(raw_val: Any) -> Optional[str]:
     return MATERIAL_STATUSES.get(norm)
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -347,19 +352,21 @@ def extract_material_view_fields(doc: Dict[str, Any]) -> Tuple:
 
     raw_ownership = doc.get("OwnerShip")
     if isinstance(raw_ownership, list):
-        ownership = as_json(raw_ownership, default_val=[])
+        ownership = as_json(raw_ownership)
+    elif raw_ownership is None:
+        ownership = None
     else:
-        ownership = as_json([], default_val=[])
+        ownership = as_json(raw_ownership)
 
     location = clean_str(doc.get("Location"), 255)
 
     raw_attrs = doc.get("Attributes")
     if isinstance(raw_attrs, dict):
-        attributes = as_json(raw_attrs, default_val={})
+        attributes = as_json(raw_attrs)
     elif raw_attrs is None:
-        attributes = as_json({}, default_val={})
+        attributes = None
     else:
-        attributes = as_json(raw_attrs, default_val={})
+        attributes = as_json(raw_attrs)
 
     tags = clean_string_list(doc.get("Tags"))
     value = clean_decimal(doc.get("Value"))
@@ -417,10 +424,10 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             author VARCHAR(255),
             publisher VARCHAR(255),
             owner_id UUID,
-            ownership JSONB DEFAULT '[]'::jsonb,
+            ownership JSONB,
             location VARCHAR(255),
-            attributes JSONB DEFAULT '{}'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
+            attributes JSONB,
+            tags TEXT[],
             value NUMERIC(18, 2),
             status material_status_enum,
             last_verified_on BIGINT,

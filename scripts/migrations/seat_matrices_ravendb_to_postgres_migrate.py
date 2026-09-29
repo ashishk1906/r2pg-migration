@@ -238,10 +238,10 @@ def clean_int(val: Any) -> Optional[int]:
         return None
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -298,7 +298,7 @@ def extract_seat_matrix_fields(doc: Dict[str, Any]) -> Tuple:
     course = clean_str(doc.get("Course"), 255)
     total_seats = clean_int(doc.get("TotalSeats"))
     break_up_raw = doc.get("BreakUp")
-    break_up = as_json(break_up_raw if isinstance(break_up_raw, list) else [], default_val=[])
+    break_up = as_json(break_up_raw)
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -338,8 +338,8 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             id UUID PRIMARY KEY,
             course_id UUID,
             course VARCHAR(255),
-            total_seats INT,
-            break_up JSONB DEFAULT '[]'::jsonb,
+            total_seats INTEGER,
+            break_up JSONB,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,

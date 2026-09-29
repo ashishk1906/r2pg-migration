@@ -269,7 +269,7 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
 
 
 def clean_decimal(
-    val: Any, default: Optional[Decimal] = Decimal("0.00")
+    val: Any, default: Optional[Decimal] = None
 ) -> Optional[Decimal]:
     if val is None:
         return default
@@ -280,7 +280,7 @@ def clean_decimal(
 
 
 def clean_quantity(
-    val: Any, default: Optional[Decimal] = Decimal("0.0000")
+    val: Any, default: Optional[Decimal] = None
 ) -> Optional[Decimal]:
     if val is None:
         return default
@@ -290,15 +290,16 @@ def clean_quantity(
         return default
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Convert raw value to list of strings for TEXT[], preserving None as SQL NULL."""
     if raw_val is None:
-        return []
+        return None
     if isinstance(raw_val, list):
-        return [str(item).strip() for item in raw_val if str(item).strip()]
+        cleaned = [str(item).strip() for item in raw_val if item is not None and str(item).strip()]
+        return cleaned if cleaned else None
     if isinstance(raw_val, str):
         cleaned = raw_val.strip()
-        return [cleaned] if cleaned else []
+        return [cleaned] if cleaned else None
     return [str(raw_val)]
 
 
@@ -394,10 +395,8 @@ def extract_inventory_item_view_fields(doc: Dict[str, Any]) -> Tuple:
     uom = clean_str(doc.get("UOM"), 50)
     owner_id = clean_uuid(doc.get("OwnerId"))
     tags = clean_string_list(doc.get("Tags"))
-    attributes = as_json(
-        doc.get("Attributes") if isinstance(doc.get("Attributes"), dict) else {},
-        default_val={},
-    )
+    raw_attrs = doc.get("Attributes")
+    attributes = as_json(raw_attrs if isinstance(raw_attrs, dict) else None)
     status = map_inventory_status(doc.get("Status"))
 
     return (
@@ -430,8 +429,8 @@ def extract_inventory_journal_view_fields(doc: Dict[str, Any]) -> Tuple:
     name = clean_str(doc.get("Name"), 255)
     date_val = parse_iso_timestamp(doc.get("Date"))
     uom = clean_str(doc.get("UOM"), 50)
-    quantity = clean_quantity(doc.get("Quantity"), default=Decimal("0.0000"))
-    rate = clean_decimal(doc.get("Rate"), default=Decimal("0.00"))
+    quantity = clean_quantity(doc.get("Quantity"))
+    rate = clean_decimal(doc.get("Rate"))
     particulars = clean_str(doc.get("Particulars"))
     reference = clean_str(doc.get("Reference"), 255)
     inventory_journal_id = clean_uuid(doc.get("InventoryJournalId"))
@@ -501,8 +500,8 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             inventory_type inventory_type_enum,
             uom VARCHAR(50),
             owner_id UUID,
-            tags TEXT[] DEFAULT '{}'::text[],
-            attributes JSONB DEFAULT '{}'::jsonb,
+            tags TEXT[],
+            attributes JSONB,
             status inventory_status_enum
         );
 
@@ -513,8 +512,8 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             name VARCHAR(255),
             date TIMESTAMPTZ,
             uom VARCHAR(50),
-            quantity NUMERIC(18, 4) DEFAULT 0.0000,
-            rate NUMERIC(18, 2) DEFAULT 0.00,
+            quantity NUMERIC(18, 4),
+            rate NUMERIC(18, 2),
             particulars TEXT,
             reference VARCHAR(255),
             inventory_journal_id UUID,

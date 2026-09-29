@@ -273,12 +273,6 @@ def parse_iso_timestamp(val: Any) -> Optional[datetime]:
 
 def extract_attendance_event_fields(doc: Dict[str, Any]) -> Optional[Tuple]:
     """Extract and validate business fields from RavenDB document.
-
-    C# AttendanceEvent (extends Entity) fields:
-    Entity base: Id, OwnerId, ParentId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy
-    AttendanceEvent: InstId, CourseId, TermName, SectionName, Date (DateTime),
-    PeriodNo (int), SubjectName, IsOptionalSubject (bool), StudentId, StaffId,
-    Attendance (string - plain string, not an enum in C#)
     """
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
@@ -387,9 +381,6 @@ def fetch_all_raven_documents(
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     """Create target attendance_event table with correct schema.
-
-    C# AttendanceEvent has no enum fields - Attendance is a plain string.
-    No NOT NULL constraints or DEFAULT values are added beyond the primary key.
     """
     cur.execute(
         """
@@ -430,11 +421,7 @@ def upsert_attendance_event(
         return None
 
     event_id = record[0]
-    cur.execute("SELECT 1 FROM attendance_event WHERE id = %s;", (event_id,))
-    is_new = cur.fetchone() is None
-
-    cur.execute(
-        """
+    sql = """
         INSERT INTO attendance_event (
             id,
             inst_id,
@@ -476,11 +463,13 @@ def upsert_attendance_event(
             owner_id            = EXCLUDED.owner_id,
             parent_id           = EXCLUDED.parent_id,
             modified_on         = EXCLUDED.modified_on,
-            modified_by         = EXCLUDED.modified_by;
-        """,
-        record,
-    )
-    return UpsertResult(record_id=event_id, inserted=is_new)
+            modified_by         = EXCLUDED.modified_by
+        RETURNING (xmax = 0);
+    """
+    cur.execute(sql, record)
+    row = cur.fetchone()
+    inserted = bool(row[0]) if row else False
+    return UpsertResult(record_id=event_id, inserted=inserted)
 
 
 # ---------------------------------------------------------------------------

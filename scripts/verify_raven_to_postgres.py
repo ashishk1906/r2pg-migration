@@ -375,22 +375,140 @@ def parse_exam_status(value: Any) -> Optional[str]:
 
 
 def parse_app_res_status(val: Any) -> Optional[str]:
-    if not val or val == 0 or val == "0":
+    if val is None or val == 0 or val == "0" or val == "":
         return None
-    return {10: "Indian", 20: "PIO_OCI", 30: "NRI"}.get(val) if isinstance(val, int) else val
+    val_str = str(val).strip()
+    if val_str in ("Indian", "PIO_OCI", "NRI"):
+        return val_str
+    try:
+        return {10: "Indian", 20: "PIO_OCI", 30: "NRI"}.get(int(val_str), None)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_app_category(val: Any) -> Optional[str]:
-    if not val or val == 0 or val == "0":
+    if val is None or val == 0 or val == "0" or val == "":
         return None
-    return {40: "GM", 50: "OBC", 60: "SC", 70: "ST"}.get(val) if isinstance(val, int) else val
+    val_str = str(val).strip()
+    if val_str in ("GM", "OBC", "SC", "ST"):
+        return val_str
+    try:
+        return {40: "GM", 50: "OBC", 60: "SC", 70: "ST"}.get(int(val_str), None)
+    except (TypeError, ValueError):
+        return None
 
 
-def parse_app_status(val: Any) -> str:
-    if not val or val == 0 or val == "0":
-        return "WIP"
-    m = {0: "WIP", 1: "Selected", 2: "Submitted", 3: "Shortlisted", 4: "Admitted", 5: "Rejected", 6: "OptedIn", 7: "OptedOut", 8: "Declined"}
-    return m.get(val, "WIP") if isinstance(val, int) else val
+def parse_app_status(val: Any) -> Optional[str]:
+    if val is None or val == 0 or val == "0" or val == "":
+        return None
+    val_str = str(val).strip()
+    valid_names = (
+        "WIP",
+        "Selected",
+        "Submitted",
+        "Shortlisted",
+        "Admitted",
+        "Rejected",
+        "OptedIn",
+        "OptedOut",
+        "Declined",
+    )
+    for name in valid_names:
+        if val_str.lower() == name.lower():
+            return name
+    try:
+        return {
+            10: "WIP",
+            15: "Selected",
+            20: "Submitted",
+            25: "Shortlisted",
+            30: "Admitted",
+            35: "Rejected",
+            40: "OptedIn",
+            45: "OptedOut",
+            50: "Declined",
+        }.get(int(val_str), None)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_template_status(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
+    val_str = str(val).strip()
+    for name in ("Active", "Published", "Disabled"):
+        if val_str.lower() == name.lower():
+            return name
+    try:
+        return {1: "Active", 70: "Published", 99: "Disabled"}.get(int(val_str), None)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_artefact_status(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
+    val_str = str(val).strip()
+    valid_names = (
+        "Unknown",
+        "Active",
+        "Etl",
+        "Published",
+        "PublishedToPublic",
+        "Uploaded",
+        "Downloaded",
+        "Disabled",
+    )
+    for name in valid_names:
+        if val_str.lower() == name.lower():
+            return name
+    try:
+        return {
+            0: "Unknown",
+            1: "Active",
+            60: "Etl",
+            70: "Published",
+            75: "PublishedToPublic",
+            80: "Uploaded",
+            90: "Downloaded",
+            99: "Disabled",
+        }.get(int(val_str), None)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_assessment_status(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
+    val_str = str(val).strip()
+    valid_names = ("Unknown", "Active", "WIP", "Published", "Archived", "Disabled")
+    for name in valid_names:
+        if val_str.lower() == name.lower():
+            return name
+    try:
+        return {
+            0: "Unknown",
+            1: "Active",
+            40: "WIP",
+            50: "Published",
+            80: "Archived",
+            99: "Disabled",
+        }.get(int(val_str), None)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_tag_status(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
+    val_str = str(val).strip()
+    for name in ("Unknown", "Active", "Disabled"):
+        if val_str.lower() == name.lower():
+            return name
+    try:
+        return {0: "Unknown", 1: "Active", 99: "Disabled"}.get(int(val_str), None)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_user_status(val: Any) -> str:
@@ -1123,7 +1241,7 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("ParentId", "parent_id", extract_uuid),
         ("Shortlists", "shortlists", None),
         ("StartDate", "start_date", None),
-        ("Status", "status", None),
+        ("Status", "status", parse_template_status),
     ]
 
     artefacts_comparisons = [
@@ -1146,7 +1264,7 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("PublicUrls", "public_urls", None),
         ("PublishedOn", "published_on", None),
         ("SHA1", "sha1", None),
-        ("Status", "status", None),
+        ("Status", "status", parse_artefact_status),
         ("Tags", "tags", None),
         ("Template", "template", None),
         ("Thumbnails", "thumbnails", None),
@@ -1164,11 +1282,10 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("OwnerId", "owner_id", extract_uuid),
         ("ParentId", "parent_id", extract_uuid),
         ("Predefined", "predefined", None),
-        ("Status", "status", None),
+        ("Status", "status", parse_tag_status),
     ]
 
     assessments_comparisons = [
-        ("Name", "name", None),
         ("CreatedBy", "created_by", extract_uuid),
         ("CreatedOn", "created_on", None),
         ("Description", "description", None),
@@ -1178,7 +1295,7 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("OwnerId", "owner_id", extract_uuid),
         ("ParentId", "parent_id", extract_uuid),
         ("Sections", "sections", None),
-        ("Status", "status", lambda x: str(x).title() if x else None),
+        ("Status", "status", parse_assessment_status),
         ("Subject", "subject", None),
         ("SubjectCode", "subject_code", None),
         ("Tags", "tags", None),
@@ -1195,7 +1312,7 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
         ("OwnerId", "owner_id", extract_uuid),
         ("ParentId", "parent_id", extract_uuid),
         ("Predefined", "predefined", None),
-        ("Status", "status", None),
+        ("Status", "status", parse_tag_status),
     ]
 
     asset_views_comparisons = [

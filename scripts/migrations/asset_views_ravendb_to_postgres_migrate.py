@@ -311,10 +311,6 @@ def map_asset_status(raw_val: Any) -> Optional[str]:
 
 def extract_asset_view_fields(doc: Dict[str, Any]) -> Tuple:
     """Extract and transform fields for asset_views table.
-
-    C# AssetView fields: Id, TrackingId, OwnerId, Location, Attributes (string),
-    Tags (List<string>), Value (decimal), LastMaintenance (Maintenance object),
-    CurrentWarranty (Warranty object), Status (AssetStatusEnum), UnderWarranty (computed).
     """
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
@@ -327,7 +323,7 @@ def extract_asset_view_fields(doc: Dict[str, Any]) -> Tuple:
     location = clean_str(doc.get("Location"), 250)
     attributes = as_json(doc.get("Attributes"))
     tags = clean_string_list(doc.get("Tags"))
-    value = parse_decimal(doc.get("Value"), default=Decimal("0.00"))
+    value = parse_decimal(doc.get("Value"))
     last_maintenance = as_json(doc.get("LastMaintenance"))
     current_warranty = as_json(doc.get("CurrentWarranty"))
     status = map_asset_status(doc.get("Status"))

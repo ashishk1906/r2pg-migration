@@ -347,14 +347,7 @@ def map_calendar_event_category(val: Any) -> Optional[str]:
 
 
 def extract_calendar_rule_fields(doc: Dict[str, Any]) -> Tuple:
-    """Extract and transform fields for calendar_rules table.
 
-    C# CalendarRule (extends Entity) fields:
-    Entity base: Id, OwnerId, ParentId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy
-    CalendarRule: Title, CronExpression, CalendarRuleStatus (CalendarRuleStatusEnum),
-    CalendarEventCategory (CalendarEventCategoryEnum), Weight (int), Duration (decimal),
-    TopicId, UserId, CreateMeetingLink (bool)
-    """
     metadata = doc.get("@metadata") or {}
     raw_id = metadata.get("@id") or doc.get("Id") or doc.get("id")
     rule_id = None
@@ -376,8 +369,8 @@ def extract_calendar_rule_fields(doc: Dict[str, Any]) -> Tuple:
     cron_expression = clean_str(doc.get("CronExpression"), 100)
     calendar_rule_status = map_calendar_rule_status(doc.get("CalendarRuleStatus"))
     calendar_event_category = map_calendar_event_category(doc.get("CalendarEventCategory"))
-    weight = clean_int(doc.get("Weight"), default=0)
-    duration = clean_decimal(doc.get("Duration"), default=Decimal("0.00"))
+    weight = clean_int(doc.get("Weight"))
+    duration = clean_decimal(doc.get("Duration"))
     topic_id = clean_uuid(doc.get("TopicId"))
     user_id = clean_uuid(doc.get("UserId"))
     create_meeting_link = clean_bool(doc.get("CreateMeetingLink"), default=False)
@@ -417,10 +410,6 @@ def extract_calendar_rule_fields(doc: Dict[str, Any]) -> Tuple:
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     """Create target enums and calendar_rules table without secondary indexes or views.
-
-    C# CalendarRuleStatusEnum: Active=1, Disabled=99 (no Unknown)
-    C# CalendarEventCategoryEnum: Event=10, Holiday=20, WeeklyHoliday=30, Exam=40
-    No NOT NULL constraints on enum columns — null in RavenDB stays NULL in PostgreSQL.
     """
     cur.execute(
         """

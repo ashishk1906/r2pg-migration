@@ -199,7 +199,6 @@ ame | Name | string | VARCHAR(150) |
 | modified_on | ModifiedOn *(Entity)* | DateTime? | TIMESTAMPTZ |
 | modified_by | ModifiedBy *(Entity)* | string (UUID) | UUID |
 
-> **Null rule:** All JSONB and TEXT[] columns store NULL if the field is null/missing in RavenDB.
 
 ---
 
@@ -265,9 +264,125 @@ ame | Name | string | VARCHAR(150) |
 | `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
 | `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
 
-> **Null rule:** All JSONB and TEXT[] columns store NULL if the field is null/missing in RavenDB.
 
 ---
 
-> **Note:** Remaining scripts (asset_views, attendance_events, calendar_rules, etc.) will be added in subsequent sections below.
+## asset_views
+
+**Script:** `asset_views_ravendb_to_postgres_migrate.py`
+**RavenDB Collection:** `AssetViews`
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `asset_status_enum` | `Active`, `Cleared`, `Disabled` | `AssetStatusEnum` | `Active` = 1, `Cleared` = 90, `Disabled` = 99 |
+
+---
+
+### Table: `asset_views`
+
+**PostgreSQL Table:** `asset_views`
+**RavenDB Source:** `AssetViews` (C# `AssetView : IReadModelAssets`)
+**Primary Key:** `id` (`UUID`)
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` (UUID) | `UUID` PRIMARY KEY |
+| `tracking_id` | `TrackingId` | `string` | `VARCHAR(100)` |
+| `owner_id` | `OwnerId` | `string` (UUID) | `UUID` |
+| `location` | `Location` | `string` | `VARCHAR(250)` |
+| `attributes` | `Attributes` | `string` (JSON) | `JSONB` |
+| `tags` | `Tags` | `List<string>` | `TEXT[]` |
+| `value` | `Value` | `decimal` | `NUMERIC(18, 2)` |
+| `last_maintenance` | `LastMaintenance` | `Maintenance` | `JSONB` |
+| `current_warranty` | `CurrentWarranty` | `Warranty` | `JSONB` |
+| `status` | `Status` | `AssetStatusEnum` | `asset_status_enum` |
+| `under_warranty` | `UnderWarranty` | `bool` | `BOOLEAN` |
+
+
+---
+
+## attendance_events
+
+**Script:** `attendance_events_ravendb_to_postgres_migrate.py`
+**RavenDB Collection:** `AttendanceEvents`
+
+### Enums
+
+*None* (`Attendance` is plain `string` in C#).
+
+---
+
+### Table: `attendance_event`
+
+**PostgreSQL Table:** `attendance_event`
+**RavenDB Source:** `AttendanceEvents` (C# `AttendanceEvent : Entity`)
+**Primary Key:** `id` (`VARCHAR(100)`)
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` | `string` | `VARCHAR(100)` PRIMARY KEY |
+| `inst_id` | `InstId` | `string` (UUID) | `UUID` |
+| `course_id` | `CourseId` | `string` (UUID) | `UUID` |
+| `term_name` | `TermName` | `string` | `VARCHAR(100)` |
+| `section_name` | `SectionName` | `string` | `VARCHAR(50)` |
+| `date` | `Date` | `DateTime` | `TIMESTAMPTZ` |
+| `period_no` | `PeriodNo` | `int` | `INTEGER` |
+| `subject_name` | `SubjectName` | `string` | `VARCHAR(200)` |
+| `is_optional_subject` | `IsOptionalSubject` | `bool` | `BOOLEAN` |
+| `student_id` | `StudentId` | `string` (UUID) | `UUID` |
+| `staff_id` | `StaffId` | `string` | `VARCHAR(100)` |
+| `attendance` | `Attendance` | `string` | `VARCHAR(50)` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+## calendar_rules
+
+**Script:** `calendar_rules_ravendb_to_postgres_migrate.py`
+**RavenDB Collection:** `CalendarRules`
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `calendar_rule_status_enum` | `Active`, `Disabled` | `CalendarRuleStatusEnum` | `Active` = 1, `Disabled` = 99 |
+| `calendar_event_category_enum` | `Event`, `Holiday`, `WeeklyHoliday`, `Exam` | `CalendarEventCategoryEnum` | `Event` = 10, `Holiday` = 20, `WeeklyHoliday` = 30, `Exam` = 40 |
+
+---
+
+### Table: `calendar_rules`
+
+**PostgreSQL Table:** `calendar_rules`
+**RavenDB Source:** `CalendarRules` (C# `CalendarRule : Entity`)
+**Primary Key:** `id` (`UUID`)
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `title` | `Title` | `string` | `VARCHAR(255)` |
+| `cron_expression` | `CronExpression` | `string` | `VARCHAR(100)` |
+| `calendar_rule_status` | `CalendarRuleStatus` | `CalendarRuleStatusEnum` | `calendar_rule_status_enum` |
+| `calendar_event_category` | `CalendarEventCategory` | `CalendarEventCategoryEnum` | `calendar_event_category_enum` |
+| `weight` | `Weight` | `int` | `INTEGER` |
+| `duration` | `Duration` | `decimal` | `NUMERIC(10, 2)` |
+| `topic_id` | `TopicId` | `string` (UUID) | `UUID` |
+| `user_id` | `UserId` | `string` (UUID) | `UUID` |
+| `create_meeting_link` | `CreateMeetingLink` | `bool` | `BOOLEAN` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+
 

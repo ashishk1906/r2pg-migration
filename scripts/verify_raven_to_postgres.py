@@ -1155,7 +1155,6 @@ def get_all_domain_specs() -> List[Dict[str, Any]]:
     ]
 
     attendance_events_comparisons = [
-        ("Name", "name", None),
         ("Attendance", "attendance", None),
         ("CourseId", "course_id", None),
         ("CreatedBy", "created_by", None),

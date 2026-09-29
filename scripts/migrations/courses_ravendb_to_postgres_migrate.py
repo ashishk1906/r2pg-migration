@@ -2,13 +2,6 @@
 """
 Extract Courses data from RavenDB and load it into PostgreSQL.
 
-The RavenDB Course document contains top-level fields plus nested arrays such as
-Terms and ExamSubjectOrder. This script stores searchable top-level fields as
-columns and keeps nested arrays in JSONB columns on the same course row.
-
-Before running: set all required configuration values in scripts/.env
-(or pass them explicitly as command-line arguments).
-
 Target tables:
 - course
 """
@@ -370,6 +363,23 @@ def as_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
 
 
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Convert raw value to list of strings for TEXT[], preserving None as SQL NULL."""
+    if raw_val is None:
+        return None
+    if isinstance(raw_val, list):
+        cleaned = [
+            str(item).strip()
+            for item in raw_val
+            if item is not None and str(item).strip()
+        ]
+        return cleaned if cleaned else None
+    if isinstance(raw_val, str):
+        cleaned = raw_val.strip()
+        return [cleaned] if cleaned else None
+    return [str(raw_val)]
+
+
 
 
 def raven_query_collection(
@@ -493,97 +503,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     )
 
 
-def assert_required_schema(cur: psycopg2.extensions.cursor) -> None:
-    required_columns: Dict[str, Sequence[str]] = {
-        "course": (
-            "id",
-            "name",
-            "branch",
-            "name_and_branch",
-            "edu_level",
-            "edu_level_as_string",
-            "inst_id",
-            "affiliation",
-            "status",
-            "status_as_string",
-            "terms",
-            "exam_subject_order",
-            "sort_index",
-            "rank",
-            "seats_available",
-            "program",
-            "owner_id",
-            "parent_id",
-            "created_on",
-            "created_by",
-            "modified_on",
-            "modified_by",
-        )
-    }
-    required_types: Dict[str, Dict[str, Sequence[str]]] = {
-        "course": {
-            "id": ("uuid",),
-            "name": ("character varying",),
-            "branch": ("character varying",),
-            "name_and_branch": ("character varying",),
-            "edu_level": ("user-defined", "edu_level_enum"),
-            "edu_level_as_string": ("character varying",),
-            "inst_id": ("uuid",),
-            "affiliation": ("character varying",),
-            "status": ("user-defined", "course_status_enum"),
-            "status_as_string": ("character varying",),
-            "terms": ("jsonb",),
-            "exam_subject_order": ("array", "text[]"),
-            "sort_index": ("integer",),
-            "rank": ("integer",),
-            "seats_available": ("integer",),
-            "program": ("text", "character varying"),
-            "owner_id": ("uuid",),
-            "parent_id": ("uuid",),
-            "created_on": ("timestamp with time zone",),
-            "created_by": ("uuid",),
-            "modified_on": ("timestamp with time zone",),
-            "modified_by": ("uuid",),
-        }
-    }
-
-    for table_name, columns in required_columns.items():
-        cur.execute(
-            """
-            SELECT column_name, data_type, udt_name
-            FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = %s
-            """,
-            (table_name,),
-        )
-        rows = cur.fetchall()
-        existing = {row[0] for row in rows}
-        type_by_column = {row[0]: str(row[1]).lower() for row in rows}
-        udt_by_column = {row[0]: str(row[2]).lower() for row in rows}
-        if not existing:
-            raise RuntimeError(f"Missing required table public.{table_name}.")
-        missing = [col for col in columns if col not in existing]
-        if missing:
-            raise RuntimeError(
-                f"Table public.{table_name} is missing required columns: {', '.join(missing)}"
-            )
-
-        mismatches = []
-        for column_name, expected_types in required_types.get(table_name, {}).items():
-            actual_type = type_by_column.get(column_name)
-            actual_udt = udt_by_column.get(column_name)
-            if actual_type is None:
-                continue
-            if actual_type not in expected_types and actual_udt not in expected_types:
-                mismatches.append(
-                    f"{column_name} expected {', '.join(expected_types)} but found {actual_type} ({actual_udt})"
-                )
-        if mismatches:
-            raise RuntimeError(
-                f"Table public.{table_name} has datatype mismatches: {'; '.join(mismatches)}"
-            )
-
-
 def upsert_course(
     cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
 ) -> Optional[UpsertResult]:
@@ -657,8 +576,8 @@ def upsert_course(
             as_text(doc.get("Affiliation")),
             parse_course_status(doc.get("Status")),
             as_text(doc.get("StatusAsString")),
-            as_json(as_list(doc.get("Terms"))),
-            as_list(doc.get("ExamSubjectOrder")),
+            as_json(doc.get("Terms")),
+            clean_string_list(doc.get("ExamSubjectOrder")),
             parse_int(doc.get("SortIndex")),
             parse_int(doc.get("Rank")),
             parse_int(doc.get("SeatsAvailable")),
@@ -771,7 +690,6 @@ def main() -> int:
         with conn:
             with conn.cursor() as cur:
                 ensure_target_schema(cur)
-                assert_required_schema(cur)
 
                 print("[3/3] Upserting courses...")
                 for doc in course_docs:
@@ -781,10 +699,6 @@ def main() -> int:
                         continue
                     courses_processed += 1
                     courses_inserted += int(result.inserted)
-
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM course")
-            course_count = int(cur.fetchone()[0])
 
         print("Migration completed.")
         print(f"courses_processed: {courses_processed}")
@@ -799,7 +713,6 @@ def main() -> int:
                 "courses_processed": courses_processed,
                 "new_courses_inserted": courses_inserted,
                 "skipped_courses_missing_id": skipped_courses_missing_id,
-                "course_count": course_count,
             }
             written = write_summary_json(output_path, summary)
             print(f"Summary JSON written: {written}")

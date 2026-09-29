@@ -246,10 +246,10 @@ def clean_bool(val: Any, default: bool = False) -> bool:
     return str(val).strip().lower() in {"true", "1", "yes"}
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -326,17 +326,15 @@ def extract_image_tag_fields(doc: Dict[str, Any]) -> Tuple:
     name = clean_str(doc.get("Name"), 255)
     predefined = clean_bool(doc.get("Predefined"), default=False)
     csn = clean_str(doc.get("CSN"), 50)
-    meta = as_json(
-        doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {},
-        default_val={},
-    )
+    raw_meta = doc.get("Meta")
+    meta = as_json(raw_meta) if isinstance(raw_meta, dict) else None
     status = map_image_tag_status(doc.get("Status"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
     created_on = parse_iso_timestamp(
         doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
+    )
     created_by = clean_uuid(doc.get("CreatedBy"))
     modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
     modified_by = clean_uuid(doc.get("ModifiedBy"))
@@ -380,9 +378,9 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         CREATE TABLE IF NOT EXISTS image_tags (
             id UUID PRIMARY KEY,
             name VARCHAR(255),
-            predefined BOOLEAN DEFAULT FALSE,
+            predefined BOOLEAN,
             csn VARCHAR(50),
-            meta JSONB DEFAULT '{}'::jsonb,
+            meta JSONB,
             status image_tag_status_enum,
             owner_id UUID,
             parent_id UUID,

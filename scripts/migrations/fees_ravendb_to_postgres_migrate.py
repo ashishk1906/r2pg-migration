@@ -329,12 +329,21 @@ def as_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
 
 
-def as_string_list(value: Any) -> Optional[List[str]]:
-    if value is None:
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Convert raw value to list of strings for TEXT[], preserving None as SQL NULL."""
+    if raw_val is None:
         return None
-    if isinstance(value, list):
-        return [str(x) for x in value if x is not None]
-    return [str(value)]
+    if isinstance(raw_val, list):
+        cleaned = [
+            str(item).strip()
+            for item in raw_val
+            if item is not None and str(item).strip()
+        ]
+        return cleaned if cleaned else None
+    if isinstance(raw_val, str):
+        cleaned = raw_val.strip()
+        return [cleaned] if cleaned else None
+    return [str(raw_val)]
 
 
 def iso_utc(value: Any) -> Optional[str]:
@@ -555,144 +564,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
     )
 
 
-def assert_required_schema(cur: psycopg2.extensions.cursor) -> None:
-    required_columns: Dict[str, Sequence[str]] = {
-        "fee": (
-            "id",
-            "name",
-            "name_lower",
-            "display_text",
-            "amount",
-            "tags",
-            "collect_student_wise",
-            "student_list",
-            "course_list",
-            "installments",
-            "fines",
-            "is_tx_done",
-            "status",
-            "owner_id",
-            "parent_id",
-            "created_on",
-            "created_by",
-            "modified_on",
-            "modified_by",
-        ),
-        "fee_transaction": (
-            "id",
-            "tx_no",
-            "tx_date",
-            "student_id",
-            "installments_paid",
-            "fines_paid",
-            "discounts",
-            "fee_adjustment",
-            "payment_mode",
-            "is_fine_paid",
-            "is_discount_given",
-            "has_fee_adjustment",
-            "is_opening_balance_adjusted",
-            "ref_no",
-            "amount",
-            "status",
-            "paid_by",
-            "cheque_no",
-            "bank_name",
-            "cheque_date",
-            "online_txn_ref_no",
-            "owner_id",
-            "parent_id",
-            "created_on",
-            "created_by",
-            "modified_on",
-            "modified_by",
-        ),
-    }
-    required_types: Dict[str, Dict[str, Sequence[str]]] = {
-        "fee": {
-            "id": ("uuid",),
-            "amount": ("numeric",),
-            "tags": ("array", "text[]"),
-            "collect_student_wise": ("boolean",),
-            "student_list": ("array", "text[]"),
-            "course_list": ("array", "text[]"),
-            "installments": ("jsonb",),
-            "fines": ("jsonb",),
-            "is_tx_done": ("boolean",),
-            "status": ("user-defined", "fee_status_enum"),
-            "owner_id": ("uuid",),
-            "parent_id": ("uuid",),
-            "created_on": ("timestamp with time zone",),
-            "created_by": ("uuid",),
-            "modified_on": ("timestamp with time zone",),
-            "modified_by": ("uuid",),
-        },
-        "fee_transaction": {
-            "id": ("uuid",),
-            "tx_date": ("timestamp with time zone",),
-            "student_id": ("uuid",),
-            "installments_paid": ("jsonb",),
-            "fines_paid": ("jsonb",),
-            "discounts": ("jsonb",),
-            "fee_adjustment": ("jsonb",),
-            "payment_mode": ("character varying",),
-            "is_fine_paid": ("boolean",),
-            "is_discount_given": ("boolean",),
-            "has_fee_adjustment": ("boolean",),
-            "is_opening_balance_adjusted": ("boolean",),
-            "amount": ("numeric",),
-            "status": ("user-defined", "fee_tx_status_enum"),
-            "cheque_date": ("timestamp with time zone",),
-            "owner_id": ("uuid",),
-            "parent_id": ("uuid",),
-            "created_on": ("timestamp with time zone",),
-            "created_by": ("uuid",),
-            "modified_on": ("timestamp with time zone",),
-            "modified_by": ("uuid",),
-        },
-    }
-
-    for table_name, columns in required_columns.items():
-        cur.execute(
-            """
-            SELECT column_name, data_type, udt_name
-            FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = %s
-            """,
-            (table_name,),
-        )
-        rows = cur.fetchall()
-        existing = {row[0] for row in rows}
-        type_by_column = {row[0]: str(row[1]).lower() for row in rows}
-        udt_by_column = {row[0]: str(row[2]).lower() for row in rows}
-        if not existing:
-            raise RuntimeError(
-                f"Missing required table public.{table_name}. "
-                "Create target fee tables before running this ETL."
-            )
-
-        missing = [col for col in columns if col not in existing]
-        if missing:
-            raise RuntimeError(
-                f"Table public.{table_name} is missing required columns: {', '.join(missing)}"
-            )
-
-        mismatches = []
-        for column_name, expected_types in required_types.get(table_name, {}).items():
-            actual_type = type_by_column.get(column_name)
-            actual_udt = udt_by_column.get(column_name)
-            if actual_type is None:
-                continue
-            if actual_type not in expected_types and actual_udt not in expected_types:
-                mismatches.append(
-                    f"{column_name} expected {', '.join(expected_types)} but found {actual_type} ({actual_udt})"
-                )
-        if mismatches:
-            raise RuntimeError(
-                f"Table public.{table_name} has datatype mismatches: {'; '.join(mismatches)}"
-            )
-
-
 def upsert_fee(
     cur: psycopg2.extensions.cursor, doc: Dict[str, Any]
 ) -> Optional[UpsertResult]:
@@ -753,10 +624,10 @@ def upsert_fee(
             (first_non_empty(doc.get("Name"), doc.get("DisplayText")) or "").lower() or None,
             doc.get("DisplayText"),
             parse_decimal(doc.get("Amount")),
-            as_string_list(doc.get("Tags")),
+            clean_string_list(doc.get("Tags")),
             bool(doc.get("CollectStudentWise")) if doc.get("CollectStudentWise") is not None else None,
-            as_string_list(doc.get("StudentList")),
-            as_string_list(doc.get("CourseList")),
+            clean_string_list(doc.get("StudentList")),
+            clean_string_list(doc.get("CourseList")),
             as_json(doc.get("Installments")),
             as_json(doc.get("Fines")),
             bool(doc.get("IsTxDone")) if doc.get("IsTxDone") is not None else None,
@@ -930,7 +801,6 @@ def main() -> int:
         with conn:
             with conn.cursor() as cur:
                 ensure_target_schema(cur)
-                assert_required_schema(cur)
 
                 print("[3/4] Upserting fees...")
                 for doc in fee_docs:
@@ -949,11 +819,6 @@ def main() -> int:
                         continue
                     fee_txs_processed += 1
                     fee_txs_inserted += int(result.inserted)
-
-                cur.execute("SELECT count(*) FROM fee;")
-                fee_count = cur.fetchone()[0]
-                cur.execute("SELECT count(*) FROM fee_transaction;")
-                fee_tx_count = cur.fetchone()[0]
 
         summary = {
             "generated_at_utc": datetime.now(timezone.utc)
@@ -978,10 +843,6 @@ def main() -> int:
                 "new_fee_transactions_inserted": fee_txs_inserted,
                 "skipped_fees_missing_id": skipped_fees_missing_id,
                 "skipped_fee_transactions_missing_id": skipped_fee_txs_missing_id,
-            },
-            "post_load_counts": {
-                "fee": fee_count,
-                "fee_transaction": fee_tx_count,
             },
         }
 

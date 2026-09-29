@@ -131,73 +131,76 @@
 
 ## artefacts
 
-**Script:** rtefacts_ravendb_to_postgres_migrate.py
-**RavenDB Collections:** ArtefactTags, Artefacts
+**Script:** `artefacts_ravendb_to_postgres_migrate.py`
+**RavenDB Collections:** `ArtefactTags`, `Artefacts`
 
 ### Enums
 
 | PostgreSQL Enum Type | Values | C# Enum | C# Values |
 |---|---|---|---|
-| 	ag_status_enum | Unknown, Active, Disabled | TagStatusEnum | Unknown=0, Active=1, Disabled=99 |
-| rtefact_status_enum | Unknown, Active, Etl, Published, PublishedToPublic, Uploaded, Downloaded, Disabled | ArtefactStatusEnum | Unknown=0, Active=1, Etl=60, Published=70, PublishedToPublic=75, Uploaded=80, Downloaded=90, Disabled=99 |
+| `tag_status_enum` | `Unknown`, `Active`, `Disabled` | `TagStatusEnum` | `Unknown` = 0, `Active` = 1, `Disabled` = 99 |
+| `artefact_status_enum` | `Unknown`, `Active`, `Etl`, `Published`, `PublishedToPublic`, `Uploaded`, `Downloaded`, `Disabled` | `ArtefactStatusEnum` | `Unknown` = 0, `Active` = 1, `Etl` = 60, `Published` = 70, `PublishedToPublic` = 75, `Uploaded` = 80, `Downloaded` = 90, `Disabled` = 99 |
 
 ---
 
-### Table: rtefact_tags
+### Table: `artefact_tags`
 
-**C# Source:** ArtefactTag : Entity
+**PostgreSQL Table:** `artefact_tags`
+**RavenDB Source:** `ArtefactTags` (Entity: `ArtefactTag : Entity`)
+**Primary Key:** `id` (`UUID`)
 
-| PG Column | C# Field | C# Type | PG Type |
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
 |---|---|---|---|
-| id | Id | string (UUID) | UUID PRIMARY KEY |
-| 
-ame | Name | string | VARCHAR(150) |
-| predefined | Predefined | ool | BOOLEAN |
-| csn | CSN | string | VARCHAR(100) |
-| meta | Meta | Dictionary<string, string> | JSONB |
-| status | Status | TagStatusEnum | 	ag_status_enum |
-| owner_id | OwnerId *(Entity)* | string (UUID) | UUID |
-| parent_id | ParentId *(Entity)* | string (UUID) | UUID |
-| created_on | CreatedOn *(Entity)* | DateTime | TIMESTAMPTZ |
-| created_by | CreatedBy *(Entity)* | string (UUID) | UUID |
-| modified_on | ModifiedOn *(Entity)* | DateTime? | TIMESTAMPTZ |
-| modified_by | ModifiedBy *(Entity)* | string (UUID) | UUID |
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `name` | `Name` | `string` | `VARCHAR(150)` |
+| `predefined` | `Predefined` | `bool` | `BOOLEAN` |
+| `csn` | `CSN` | `string` | `VARCHAR(100)` |
+| `meta` | `Meta` | `Dictionary<string, string>` | `JSONB` |
+| `status` | `Status` | `TagStatusEnum` | `tag_status_enum` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
 
 ---
 
-### Table: rtefacts
+### Table: `artefacts`
 
-**C# Source:** Artefact : Entity
+**PostgreSQL Table:** `artefacts`
+**RavenDB Source:** `Artefacts` (Entity: `Artefact : Entity`)
+**Primary Key:** `id` (`UUID`)
 
-| PG Column | C# Field | C# Type | PG Type |
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
 |---|---|---|---|
-| id | Id | string (UUID) | UUID PRIMARY KEY |
-| url | Url | string | TEXT |
-| 	itle | Title | string | VARCHAR(250) |
-| description | Description | string | TEXT |
-| meta_data | MetaData | Dictionary<string, string> | JSONB |
-| 	ags | Tags | List<string> | TEXT[] |
-| mime_type | MimeType | string | VARCHAR(100) |
-| ile_name | FileName | string | VARCHAR(250) |
-| ile_size | FileSize | double | DOUBLE PRECISION |
-| status | Status | ArtefactStatusEnum | rtefact_status_enum |
-| sha1 | SHA1 | string | VARCHAR(100) |
-| model | Model | string | TEXT |
-| 	emplate | Template | string | TEXT |
-| csv | Csv | string | TEXT |
-| change_set | ChangeSet | List<ChangeRef> | JSONB |
-| comments | Comments | List<Comment> | JSONB |
-| ideo_links | VideoLinks | List<VideoLink> | JSONB |
-| data_attributes | DataAttributes | List<DataAttribute> | JSONB |
-| published_on | PublishedOn | DateTime | TIMESTAMPTZ |
-| public_urls | PublicUrls | List<string> | TEXT[] |
-| 	humbnails | Thumbnails | List<string> | TEXT[] |
-| owner_id | OwnerId *(Entity)* | string (UUID) | UUID |
-| parent_id | ParentId *(Entity)* | string (UUID) | UUID |
-| created_on | CreatedOn *(Entity)* | DateTime | TIMESTAMPTZ |
-| created_by | CreatedBy *(Entity)* | string (UUID) | UUID |
-| modified_on | ModifiedOn *(Entity)* | DateTime? | TIMESTAMPTZ |
-| modified_by | ModifiedBy *(Entity)* | string (UUID) | UUID |
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `url` | `Url` | `string` | `TEXT` |
+| `title` | `Title` | `string` | `VARCHAR(250)` |
+| `description` | `Description` | `string` | `TEXT` |
+| `meta_data` | `MetaData` | `Dictionary<string, string>` | `JSONB` |
+| `tags` | `Tags` | `List<string>` | `TEXT[]` |
+| `mime_type` | `MimeType` | `string` | `VARCHAR(100)` |
+| `file_name` | `FileName` | `string` | `VARCHAR(250)` |
+| `file_size` | `FileSize` | `double` | `DOUBLE PRECISION` |
+| `status` | `Status` | `ArtefactStatusEnum` | `artefact_status_enum` |
+| `sha1` | `SHA1` | `string` | `VARCHAR(100)` |
+| `model` | `Model` | `string` | `TEXT` |
+| `template` | `Template` | `string` | `TEXT` |
+| `csv` | `Csv` | `string` | `TEXT` |
+| `change_set` | `ChangeSet` | `List<ChangeRef>` | `JSONB` |
+| `comments` | `Comments` | `List<Comment>` | `JSONB` |
+| `video_links` | `VideoLinks` | `List<VideoLink>` | `JSONB` |
+| `data_attributes` | `DataAttributes` | `List<DataAttribute>` | `JSONB` |
+| `published_on` | `PublishedOn` | `DateTime` | `TIMESTAMPTZ` |
+| `public_urls` | `PublicUrls` | `List<string>` | `TEXT[]` |
+| `thumbnails` | `Thumbnails` | `List<string>` | `TEXT[]` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
 
 
 ---
@@ -484,7 +487,281 @@ All three tables share the same Common Commit Wrapper schema:
 
 ---
 
-> **Note:** Remaining scripts (courses, emails, exams, fees, etc.) will be added in subsequent sections below.
+## courses
 
+**Script:** `courses_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `Courses`  
 
+### Enums
 
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `edu_level_enum` | `Unknown`, `PreNursery`, `Nursery`, `School`, `UnderGraduate`, `Graduate`, `PostGraduate` | `EduLevelEnum` | `Unknown` = -1, `PreNursery` = 2, `Nursery` = 5, `School` = 10, `UnderGraduate` = 20, `Graduate` = 30, `PostGraduate` = 40 |
+| `course_status_enum` | `Unknown`, `Active`, `Disabled` | `CourseStatusEnum` | `Unknown` = 0, `Active` = 1, `Disabled` = 99 |
+
+---
+
+### Table: `course`
+
+**PostgreSQL Table:** `course`  
+**RavenDB Source:** `Courses` (C# `Course : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `name` | `Name` | `string` | `VARCHAR(200)` |
+| `branch` | `Branch` | `string` | `VARCHAR(100)` |
+| `name_and_branch` | `NameAndBranch` | `string` | `VARCHAR(200)` |
+| `edu_level` | `EduLevel` | `EduLevelEnum` | `edu_level_enum` |
+| `edu_level_as_string` | `EduLevelAsString` | `string` | `VARCHAR(32)` |
+| `inst_id` | `InstId` | `string` (UUID) | `UUID` |
+| `affiliation` | `Affiliation` | `string` | `VARCHAR(100)` |
+| `status` | `Status` | `CourseStatusEnum` | `course_status_enum` |
+| `status_as_string` | `StatusAsString` | `string` | `VARCHAR(32)` |
+| `terms` | `Terms` | `List<Term>` | `JSONB` |
+| `exam_subject_order` | `ExamSubjectOrder` | `List<string>` | `TEXT[]` |
+| `sort_index` | `SortIndex` | `int` | `INTEGER` |
+| `rank` | `Rank` | `int` | `INTEGER` |
+| `seats_available` | `SeatsAvailable` | `int` | `INTEGER` |
+| `program` | `Program` | `string` | `TEXT` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+## emails
+
+**Script:** `emails_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `Emails`  
+
+### Enums
+
+*None (Standard string types used for type/from/subject)*
+
+---
+
+### Table: `email`
+
+**PostgreSQL Table:** `email`  
+**RavenDB Source:** `Emails` (C# `Email : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `recipients` | `Recipients` | `List<string>` | `TEXT[]` |
+| `message` | `Message` | `string` | `TEXT` |
+| `type` | `Type` | `string` | `VARCHAR(50)` |
+| `from` | `From` | `string` | `VARCHAR(255)` |
+| `subject` | `Subject` | `string` | `VARCHAR(500)` |
+| `attachments` | `Attachments` | `List<Attachment>` | `JSONB` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+## exams
+
+**Script:** `exams_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `Exams`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `exam_status_enum` | `Unknown`, `Active`, `Scheduled`, `Conducted`, `Locked`, `Disabled` | `ExamStatusEnum` | `Unknown` = 0, `Active` = 1, `Scheduled` = 10, `Conducted` = 20, `Locked` = 90, `Disabled` = 99 |
+
+---
+
+### Table: `exam`
+
+**PostgreSQL Table:** `exam`  
+**RavenDB Source:** `Exams` (C# `Exam : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `name` | `Name` | `string` | `VARCHAR(200)` |
+| `inst_id` | `InstId` | `string` (UUID) | `UUID` |
+| `course_id` | `CourseId` | `string` (UUID) | `UUID` |
+| `term` | `Term` | `string` | `VARCHAR(64)` |
+| `section` | `Section` | `string` | `VARCHAR(32)` |
+| `exam_contents` | `ExamContents` | `List<ExamContent>` | `JSONB` |
+| `lock_history` | `LockHistory` | `List<LockEntry>` | `JSONB` |
+| `attendance_list` | `AttendanceList` | `List<Attendance>` | `JSONB` |
+| `remarks_list` | `RemarksList` | `List<Remark>` | `JSONB` |
+| `status` | `Status` | `ExamStatusEnum` | `exam_status_enum` |
+| `days_worked` | `DaysWorked` | `int` | `INTEGER` |
+| `total_max_marks` | `TotalMaxMarks` | `decimal` | `NUMERIC(14, 2)` |
+| `merge_index` | `MergeIndex` | `int` | `INTEGER` |
+| `start_date` | `StartDate` | `DateTime` | `TIMESTAMPTZ` |
+| `result_date` | `ResultDate` | `DateTime` | `TIMESTAMPTZ` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+## fees
+
+**Script:** `fees_ravendb_to_postgres_migrate.py`  
+**RavenDB Collections:** `Fees`, `FeeTxes`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `fee_status_enum` | `Unknown`, `Active`, `Disabled` | `FeeStatusEnum` | `Unknown` = 0, `Active` = 1, `Disabled` = 99 |
+| `fee_tx_status_enum` | `Active`, `Disabled` | `FeeTxStatusEnum` | `Active` = 1, `Disabled` = 99 |
+
+---
+
+### Table: `fee`
+
+**PostgreSQL Table:** `fee`  
+**RavenDB Source:** `Fees` (C# `Fee : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `name` | `Name` | `string` | `VARCHAR(200)` |
+| `name_lower` | `NameLower` | `string` | `VARCHAR(200)` |
+| `display_text` | `DisplayText` | `string` | `VARCHAR(200)` |
+| `amount` | `Amount` | `decimal` | `NUMERIC(14, 2)` |
+| `tags` | `Tags` | `List<string>` | `TEXT[]` |
+| `collect_student_wise` | `CollectStudentWise` | `bool` | `BOOLEAN` |
+| `student_list` | `StudentList` | `List<string>` | `TEXT[]` |
+| `course_list` | `CourseList` | `List<string>` | `TEXT[]` |
+| `installments` | `Installments` | `List<Installment>` | `JSONB` |
+| `fines` | `Fines` | `List<Fine>` | `JSONB` |
+| `is_tx_done` | `IsTxDone` | `bool` | `BOOLEAN` |
+| `status` | `Status` | `FeeStatusEnum` | `fee_status_enum` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+### Table: `fee_transaction`
+
+**PostgreSQL Table:** `fee_transaction`  
+**RavenDB Source:** `FeeTxes` (C# `FeeTx : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `tx_no` | `TxNo` | `string` | `VARCHAR(100)` |
+| `tx_date` | `TxDate` | `DateTime` | `TIMESTAMPTZ` |
+| `student_id` | `StudentId` | `string` (UUID) | `UUID` |
+| `installments_paid` | `InstallmentsPaid` | `List<FeeTxDto>` | `JSONB` |
+| `fines_paid` | `FinesPaid` | `List<FeeFineDto>` | `JSONB` |
+| `discounts` | `Discounts` | `List<FeeDiscountDto>` | `JSONB` |
+| `fee_adjustment` | `FeeAdjustment` | `FeeAdjustmentDto` | `JSONB` |
+| `payment_mode` | `PaymentMode` | `string` | `VARCHAR(64)` |
+| `is_fine_paid` | `IsFinePaid` | `bool` | `BOOLEAN` |
+| `is_discount_given` | `IsDiscountGiven` | `bool` | `BOOLEAN` |
+| `has_fee_adjustment` | `HasFeeAdjustment` | `bool` | `BOOLEAN` |
+| `is_opening_balance_adjusted` | `IsOpeningBalanceAdjusted` | `bool` | `BOOLEAN` |
+| `ref_no` | `RefNo` | `string` | `VARCHAR(100)` |
+| `amount` | `Amount` | `decimal` | `NUMERIC(14, 2)` |
+| `status` | `Status` | `FeeTxStatusEnum` | `fee_tx_status_enum` |
+| `paid_by` | `PaidBy` | `string` | `VARCHAR(100)` |
+| `cheque_no` | `ChequeNo` | `string` | `VARCHAR(100)` |
+| `bank_name` | `BankName` | `string` | `VARCHAR(200)` |
+| `cheque_date` | `ChequeDate` | `DateTime` | `TIMESTAMPTZ` |
+| `online_txn_ref_no` | `OnlineTxnRefNo` | `string` | `VARCHAR(100)` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+## gradings
+
+**Script:** `gradings_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `Gradings`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `grading_status_enum` | `Active`, `Disabled` | `GradingStatusEnum` | `Active` = 1, `Disabled` = 99 |
+
+---
+
+### Table: `gradings`
+
+**PostgreSQL Table:** `gradings`  
+**RavenDB Source:** `Gradings` (C# `Grading : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `status` | `Status` | `GradingStatusEnum` | `grading_status_enum` |
+| `grading_rules` | `GradingRules` | `List<GradingRule>` | `JSONB` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---
+
+## image_tags
+
+**Script:** `image_tags_ravendb_to_postgres_migrate.py`  
+**RavenDB Collection:** `ImageTags`  
+
+### Enums
+
+| PostgreSQL Enum Type | Values | C# Enum | C# Values |
+|---|---|---|---|
+| `image_tag_status_enum` | `Unknown`, `Active`, `Disabled` | `TagStatusEnum` | `Unknown` = 0, `Active` = 1, `Disabled` = 99 |
+
+---
+
+### Table: `image_tags`
+
+**PostgreSQL Table:** `image_tags`  
+**RavenDB Source:** `ImageTags` (C# `ImageTag : Entity`)  
+**Primary Key:** `id` (`UUID`)  
+
+| PostgreSQL Column | C# Property | C# Type | PostgreSQL Type |
+|---|---|---|---|
+| `id` | `Id` *(Entity)* | `string` (UUID) | `UUID` PRIMARY KEY |
+| `name` | `Name` | `string` | `VARCHAR(255)` |
+| `predefined` | `Predefined` | `bool` | `BOOLEAN` |
+| `csn` | `CSN` | `string` | `VARCHAR(50)` |
+| `meta` | `Meta` | `Dictionary<string, string>` | `JSONB` |
+| `status` | `Status` | `TagStatusEnum` | `image_tag_status_enum` |
+| `owner_id` | `OwnerId` *(Entity)* | `string` (UUID) | `UUID` |
+| `parent_id` | `ParentId` *(Entity)* | `string` (UUID) | `UUID` |
+| `created_on` | `CreatedOn` *(Entity)* | `DateTime` | `TIMESTAMPTZ` |
+| `created_by` | `CreatedBy` *(Entity)* | `string` (UUID) | `UUID` |
+| `modified_on` | `ModifiedOn` *(Entity)* | `DateTime?` | `TIMESTAMPTZ` |
+| `modified_by` | `ModifiedBy` *(Entity)* | `string` (UUID) | `UUID` |
+
+---

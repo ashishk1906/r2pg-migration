@@ -3,26 +3,9 @@
 Extract Email-related data from RavenDB, transform it to PostgreSQL schema,
 and load into PostgreSQL.
 
-Source:
-- RavenDB Emails collection (Repo.Resource.Email in ct.connect)
-
 Target table:
 - email
 
-Target schema:
-- id                  UUID PRIMARY KEY
-- recipients          TEXT[] NOT NULL
-- message             TEXT NOT NULL
-- type                VARCHAR(50) NOT NULL DEFAULT 'Generic'
-- "from"              VARCHAR(255) NOT NULL
-- subject             VARCHAR(500)
-- attachments         JSONB
-- owner_id            UUID
-- parent_id           UUID
-- created_on          TIMESTAMPTZ NOT NULL
-- created_by          UUID
-- modified_on         TIMESTAMPTZ
-- modified_by         UUID
 """
 
 from __future__ import annotations
@@ -320,15 +303,20 @@ def clean_uuid(raw_val: Any) -> Optional[str]:
     return None
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Convert raw value to list of strings for TEXT[], preserving None as SQL NULL."""
     if raw_val is None:
-        return []
+        return None
     if isinstance(raw_val, list):
-        return [str(item).strip() for item in raw_val if str(item).strip()]
+        cleaned = [
+            str(item).strip()
+            for item in raw_val
+            if item is not None and str(item).strip()
+        ]
+        return cleaned if cleaned else None
     if isinstance(raw_val, str):
         cleaned = raw_val.strip()
-        return [cleaned] if cleaned else []
+        return [cleaned] if cleaned else None
     return [str(raw_val)]
 
 
@@ -339,10 +327,25 @@ def parse_iso_timestamp(raw_val: Any) -> Optional[datetime]:
     val_str = str(raw_val).strip()
     if not val_str:
         return None
+    normalized = val_str[:-1] + "+00:00" if val_str.endswith("Z") else val_str
+    if "." in normalized:
+        base, frac = normalized.split(".", 1)
+        tz_pos = max(frac.find("+"), frac.find("-"))
+        if tz_pos >= 0:
+            frac_part = frac[:tz_pos]
+            tz_part = frac[tz_pos:]
+        else:
+            frac_part = frac
+            tz_part = ""
+        digits = "".join(ch for ch in frac_part if ch.isdigit())
+        if len(digits) > 6:
+            digits = digits[:6]
+        normalized = f"{base}.{digits}{tz_part}" if digits else f"{base}{tz_part}"
+    if "+" not in normalized[10:] and "-" not in normalized[10:]:
+        normalized = f"{normalized}+00:00"
+
     try:
-        if val_str.endswith("Z"):
-            val_str = val_str[:-1] + "+00:00"
-        dt = datetime.fromisoformat(val_str)
+        dt = datetime.fromisoformat(normalized)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
@@ -354,15 +357,15 @@ def extract_email_fields(
     doc: Dict[str, Any], default_collection: str
 ) -> Tuple[
     str,
-    List[str],
-    str,
-    str,
-    str,
+    Optional[List[str]],
+    Optional[str],
+    Optional[str],
+    Optional[str],
     Optional[str],
     Optional[Any],
     Optional[str],
     Optional[str],
-    datetime,
+    Optional[datetime],
     Optional[str],
     Optional[datetime],
     Optional[str],
@@ -419,7 +422,7 @@ def extract_email_fields(
 
     # 10. Timestamps and audit users
     raw_created_on = doc.get("CreatedOn") or metadata.get("@last-modified")
-    created_on = parse_iso_timestamp(raw_created_on) or datetime.now(timezone.utc)
+    created_on = parse_iso_timestamp(raw_created_on)
     created_by = clean_uuid(doc.get("CreatedBy"))
 
     modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
@@ -448,8 +451,7 @@ def extract_email_fields(
 
 
 def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
-    """Create email table, indexes, and views idempotently."""
-    # 1. Main email table
+    """Create email table idempotently without secondary indexes or views."""
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS email (
@@ -467,40 +469,6 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             modified_on TIMESTAMPTZ,
             modified_by UUID
         );
-        ALTER TABLE email ALTER COLUMN recipients DROP NOT NULL;
-        ALTER TABLE email ALTER COLUMN message DROP NOT NULL;
-        ALTER TABLE email ALTER COLUMN type DROP NOT NULL;
-        ALTER TABLE email ALTER COLUMN type DROP DEFAULT;
-        ALTER TABLE email ALTER COLUMN "from" DROP NOT NULL;
-        ALTER TABLE email ALTER COLUMN created_on DROP NOT NULL;
-        ALTER TABLE email DROP COLUMN IF EXISTS from_address;
-        ALTER TABLE email DROP COLUMN IF EXISTS audited;
-        ALTER TABLE email DROP COLUMN IF EXISTS collection;
-        ALTER TABLE email DROP COLUMN IF EXISTS raven_clr_type;
-        ALTER TABLE email DROP COLUMN IF EXISTS raven_change_vector;
-        ALTER TABLE email DROP COLUMN IF EXISTS raven_last_modified;
-        ALTER TABLE email ALTER COLUMN type TYPE VARCHAR(50);
-        ALTER TABLE email ALTER COLUMN "from" TYPE VARCHAR(255);
-        ALTER TABLE email ALTER COLUMN subject TYPE VARCHAR(500);
-        """
-    )
-
-    # 2. Indexes
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS email_owner_id_idx ON email (owner_id);
-        CREATE INDEX IF NOT EXISTS email_created_on_idx ON email (created_on);
-        CREATE INDEX IF NOT EXISTS email_created_by_idx ON email (created_by);
-        CREATE INDEX IF NOT EXISTS email_type_idx ON email (type);
-        CREATE INDEX IF NOT EXISTS email_recipients_gin_idx ON email USING GIN (recipients);
-        CREATE INDEX IF NOT EXISTS email_attachments_gin_idx ON email USING GIN (attachments);
-        """
-    )
-
-    # Clean up any previously created views if present
-    cur.execute(
-        """
-        DROP VIEW IF EXISTS emails, v_email_attachment CASCADE;
         """
     )
 
@@ -637,7 +605,7 @@ def main() -> int:
 
         with conn:
             with conn.cursor() as cur:
-                print("[3/4] Ensuring target schema & views...")
+                print("[3/4] Ensuring target schema...")
                 ensure_target_schema(cur)
 
                 print("[4/4] Upserting emails...")

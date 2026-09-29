@@ -227,10 +227,10 @@ def clean_uuid(val: Any) -> Optional[str]:
     return match.group(0).lower() if match else None
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -306,15 +306,13 @@ def extract_grading_fields(doc: Dict[str, Any]) -> Tuple:
 
     status = map_grading_status(doc.get("Status"))
     raw_rules = doc.get("GradingRules") or doc.get("Rules")
-    grading_rules = as_json(
-        raw_rules if isinstance(raw_rules, list) else [], default_val=[]
-    )
+    grading_rules = as_json(raw_rules) if raw_rules is not None else None
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
     created_on = parse_iso_timestamp(
         doc.get("CreatedOn") or metadata.get("@last-modified")
-    ) or datetime.now(timezone.utc)
+    )
     created_by = clean_uuid(doc.get("CreatedBy"))
     modified_on = parse_iso_timestamp(doc.get("ModifiedOn"))
     modified_by = clean_uuid(doc.get("ModifiedBy"))
@@ -354,7 +352,7 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         CREATE TABLE IF NOT EXISTS gradings (
             id UUID PRIMARY KEY,
             status grading_status_enum,
-            grading_rules JSONB DEFAULT '[]'::jsonb,
+            grading_rules JSONB,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ,

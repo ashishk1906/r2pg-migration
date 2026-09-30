@@ -1,11 +1,5 @@
 # Migration Schema Reference
 
-> Complete reference mapping RavenDB documents to PostgreSQL tables and C# (.NET) domain entities.
-> - **Primary Keys:** Every table uses UUID or VARCHAR primary keys (no auto-increment serials).
-> - **Zero Constraints:** No secondary indexes, no foreign keys, and no column defaults in PostgreSQL DDL.
-> - **Strict Nullability:** Array types (`TEXT[]`) and JSON structures (`JSONB`) preserve SQL `NULL` semantics (never defaulted to `{}` or `[]`).
-> - **Enum Alignment:** Enum types and integer ordinal values are validated 1:1 against the active CT-2 .NET microservice models.
-
 ---
 
 ## Table of Contents

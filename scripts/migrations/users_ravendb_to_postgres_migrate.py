@@ -226,18 +226,18 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any, default: bool = False) -> bool:
+def clean_bool(val: Any) -> Optional[bool]:
     if val is None:
-        return default
+        return None
     if isinstance(val, bool):
         return val
     return str(val).strip().lower() in {"true", "1", "yes"}
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Ensure raw value is converted to a clean list of strings for TEXT[], preserving None."""
     if raw_val is None:
-        return []
+        return None
     if isinstance(raw_val, list):
         return [str(item).strip() for item in raw_val if str(item).strip()]
     if isinstance(raw_val, str):
@@ -246,10 +246,10 @@ def clean_string_list(raw_val: Any) -> List[str]:
     return [str(raw_val)]
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -362,16 +362,16 @@ def extract_user_fields(doc: Dict[str, Any]) -> Tuple:
     otp = clean_str(doc.get("OTP"), 50)
     otp_validity = parse_iso_timestamp(doc.get("OTPValidity"))
     handle = clean_str(doc.get("Handle"), 100)
-    force_change_password = clean_bool(doc.get("ForceChangePassword"), False)
+    force_change_password = clean_bool(doc.get("ForceChangePassword"))
     password_changed_on = parse_iso_timestamp(doc.get("PasswordChangedOn"))
     confirmed_on = parse_iso_timestamp(doc.get("ConfirmedOn"))
 
-    profile = as_json(doc.get("Profile") if isinstance(doc.get("Profile"), dict) else {}, default_val={})
-    preferences = as_json(doc.get("Preferences") if isinstance(doc.get("Preferences"), dict) else {}, default_val={})
+    profile = as_json(doc.get("Profile"))
+    preferences = as_json(doc.get("Preferences"))
     status = map_user_status(doc.get("Status"))
-    is_virtual = clean_bool(doc.get("IsVirtual"), False)
+    is_virtual = clean_bool(doc.get("IsVirtual"))
 
-    push_notifications = as_json(doc.get("PushNotifications") if isinstance(doc.get("PushNotifications"), list) else [], default_val=[])
+    push_notifications = as_json(doc.get("PushNotifications"))
     personas = clean_string_list(doc.get("Personas"))
     current_persona = clean_uuid(doc.get("CurrentPersona"))
 
@@ -386,13 +386,13 @@ def extract_user_fields(doc: Dict[str, Any]) -> Tuple:
     dob = parse_iso_timestamp(doc.get("DOB"))
     email = clean_str(doc.get("Email"), 255)
     mobile = clean_str(doc.get("Mobile"), 50)
-    notification = clean_bool(doc.get("Notification"), True)
+    notification = clean_bool(doc.get("Notification"))
     virtual_id = clean_str(doc.get("VirtualId"), 255)
 
-    contacts = as_json(doc.get("Contacts") if isinstance(doc.get("Contacts"), list) else [], default_val=[])
-    addresses = as_json(doc.get("Addresses") if isinstance(doc.get("Addresses"), list) else [], default_val=[])
+    contacts = as_json(doc.get("Contacts"))
+    addresses = as_json(doc.get("Addresses"))
     tags = clean_string_list(doc.get("Tags"))
-    attributes = as_json(doc.get("Attributes") if isinstance(doc.get("Attributes"), dict) else {}, default_val={})
+    attributes = as_json(doc.get("Attributes"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -504,15 +504,15 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             otp VARCHAR(50),
             otp_validity TIMESTAMPTZ,
             handle VARCHAR(100),
-            force_change_password BOOLEAN DEFAULT FALSE,
+            force_change_password BOOLEAN,
             password_changed_on TIMESTAMPTZ,
             confirmed_on TIMESTAMPTZ,
-            profile JSONB DEFAULT '{}'::jsonb,
-            preferences JSONB DEFAULT '{}'::jsonb,
-            status user_status_enum NOT NULL DEFAULT 'Active',
-            is_virtual BOOLEAN DEFAULT FALSE,
-            push_notifications JSONB DEFAULT '[]'::jsonb,
-            personas TEXT[] DEFAULT '{}'::text[],
+            profile JSONB,
+            preferences JSONB,
+            status user_status_enum NOT NULL,
+            is_virtual BOOLEAN,
+            push_notifications JSONB,
+            personas TEXT[],
             current_persona UUID,
             recovery_email VARCHAR(255),
             recovery_mobile VARCHAR(50),
@@ -525,12 +525,12 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             dob TIMESTAMPTZ,
             email VARCHAR(255),
             mobile VARCHAR(50),
-            notification BOOLEAN DEFAULT TRUE,
+            notification BOOLEAN,
             virtual_id VARCHAR(255),
-            contacts JSONB DEFAULT '[]'::jsonb,
-            addresses JSONB DEFAULT '[]'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            attributes JSONB DEFAULT '{}'::jsonb,
+            contacts JSONB,
+            addresses JSONB,
+            tags TEXT[],
+            attributes JSONB,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,

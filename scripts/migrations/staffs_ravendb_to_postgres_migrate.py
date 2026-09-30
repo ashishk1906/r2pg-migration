@@ -226,10 +226,10 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Ensure raw value is converted to a clean list of strings for TEXT[], preserving None."""
     if raw_val is None:
-        return []
+        return None
     if isinstance(raw_val, list):
         return [str(item).strip() for item in raw_val if str(item).strip()]
     if isinstance(raw_val, str):
@@ -238,10 +238,10 @@ def clean_string_list(raw_val: Any) -> List[str]:
     return [str(raw_val)]
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -348,16 +348,16 @@ def extract_staff_fields(doc: Dict[str, Any]) -> Tuple:
 
     inst_id = clean_uuid(doc.get("InstId"))
     doj = parse_iso_timestamp(doc.get("DOJ"))
-    designations = as_json(doc.get("Designations") if isinstance(doc.get("Designations"), list) else [], default_val=[])
+    designations = as_json(doc.get("Designations"))
     status = map_staff_status(doc.get("Status"))
-    employment_history = as_json(doc.get("EmploymentHistory") if isinstance(doc.get("EmploymentHistory"), list) else [], default_val=[])
-    course_subject_list = as_json(doc.get("CourseSubjectList") if isinstance(doc.get("CourseSubjectList"), list) else [], default_val=[])
+    employment_history = as_json(doc.get("EmploymentHistory"))
+    course_subject_list = as_json(doc.get("CourseSubjectList"))
     alias = clean_str(doc.get("Alias"), 200)
-    class_teacher = as_json(doc.get("ClassTeacher") if isinstance(doc.get("ClassTeacher"), dict) else {}, default_val={})
+    class_teacher = as_json(doc.get("ClassTeacher"))
     ref_id = clean_str(doc.get("RefId"), 100)
     user_id = clean_uuid(doc.get("UserId"))
-    salaries = as_json(doc.get("Salaries") if isinstance(doc.get("Salaries"), list) else [], default_val=[])
-    payslips = as_json(doc.get("Payslips") if isinstance(doc.get("Payslips"), list) else [], default_val=[])
+    salaries = as_json(doc.get("Salaries"))
+    payslips = as_json(doc.get("Payslips"))
 
     first_name = clean_str(doc.get("FirstName"), 150)
     middle_name = clean_str(doc.get("MiddleName"), 150)
@@ -370,10 +370,10 @@ def extract_staff_fields(doc: Dict[str, Any]) -> Tuple:
     mobile = clean_str(doc.get("Mobile"), 50)
     virtual_id = clean_str(doc.get("VirtualId"), 255)
 
-    contacts = as_json(doc.get("Contacts") if isinstance(doc.get("Contacts"), list) else [], default_val=[])
-    addresses = as_json(doc.get("Addresses") if isinstance(doc.get("Addresses"), list) else [], default_val=[])
+    contacts = as_json(doc.get("Contacts"))
+    addresses = as_json(doc.get("Addresses"))
     tags = clean_string_list(doc.get("Tags"))
-    attributes = as_json(doc.get("Attributes") if isinstance(doc.get("Attributes"), dict) else {}, default_val={})
+    attributes = as_json(doc.get("Attributes"))
 
     owner_id = clean_uuid(doc.get("OwnerId"))
     parent_id = clean_uuid(doc.get("ParentId"))
@@ -455,16 +455,16 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             id UUID PRIMARY KEY,
             inst_id UUID,
             doj TIMESTAMPTZ,
-            designations JSONB DEFAULT '[]'::jsonb,
-            status staff_status_enum NOT NULL DEFAULT 'Active',
-            employment_history JSONB DEFAULT '[]'::jsonb,
-            course_subject_list JSONB DEFAULT '[]'::jsonb,
+            designations JSONB,
+            status staff_status_enum NOT NULL,
+            employment_history JSONB,
+            course_subject_list JSONB,
             alias VARCHAR(200),
-            class_teacher JSONB DEFAULT '{}'::jsonb,
+            class_teacher JSONB,
             ref_id VARCHAR(100),
             user_id UUID,
-            salaries JSONB DEFAULT '[]'::jsonb,
-            payslips JSONB DEFAULT '[]'::jsonb,
+            salaries JSONB,
+            payslips JSONB,
             first_name VARCHAR(150),
             middle_name VARCHAR(150),
             last_name VARCHAR(150),
@@ -475,10 +475,10 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             email VARCHAR(255),
             mobile VARCHAR(50),
             virtual_id VARCHAR(255),
-            contacts JSONB DEFAULT '[]'::jsonb,
-            addresses JSONB DEFAULT '[]'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            attributes JSONB DEFAULT '{}'::jsonb,
+            contacts JSONB,
+            addresses JSONB,
+            tags TEXT[],
+            attributes JSONB,
             owner_id UUID,
             parent_id UUID,
             created_on TIMESTAMPTZ NOT NULL,

@@ -226,18 +226,18 @@ def clean_str(val: Any, max_len: Optional[int] = None) -> Optional[str]:
     return s[:max_len] if max_len else s
 
 
-def clean_bool(val: Any, default: bool = False) -> bool:
+def clean_bool(val: Any) -> Optional[bool]:
     if val is None:
-        return default
+        return None
     if isinstance(val, bool):
         return val
     return str(val).strip().lower() in {"true", "1", "yes"}
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Ensure raw value is converted to a clean list of strings for TEXT[], preserving None."""
     if raw_val is None:
-        return []
+        return None
     if isinstance(raw_val, list):
         return [str(item).strip() for item in raw_val if str(item).strip()]
     if isinstance(raw_val, str):
@@ -246,10 +246,10 @@ def clean_string_list(raw_val: Any) -> List[str]:
     return [str(raw_val)]
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -402,12 +402,12 @@ def extract_topic_fields(doc: Dict[str, Any]) -> Tuple:
     subscriptions = as_json(doc.get("Subscriptions"))
 
     status = map_topic_status(doc.get("Status"))
-    meta = as_json(doc.get("Meta") if isinstance(doc.get("Meta"), dict) else {}, default_val={})
+    meta = as_json(doc.get("Meta"))
     tags = clean_string_list(doc.get("Tags"))
 
-    can_unsubscribe = clean_bool(doc.get("CanUnsubscribe"), False)
-    can_publish = clean_bool(doc.get("CanPublish"), False)
-    is_subscription_allowed = clean_bool(doc.get("IsSubscriptionAllowed"), False)
+    can_unsubscribe = clean_bool(doc.get("CanUnsubscribe"))
+    can_publish = clean_bool(doc.get("CanPublish"))
+    is_subscription_allowed = clean_bool(doc.get("IsSubscriptionAllowed"))
     handle = clean_str(doc.get("Handle"), 150)
 
     owner_id = clean_uuid(doc.get("OwnerId"))
@@ -494,16 +494,16 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             name VARCHAR(255),
             friendly_name VARCHAR(255),
             description TEXT,
-            role topic_role_enum NOT NULL DEFAULT 'Admin',
-            category topic_category_enum NOT NULL DEFAULT 'PrivateToInstitue',
-            access topic_access_enum NOT NULL DEFAULT 'Open',
+            role topic_role_enum NOT NULL,
+            category topic_category_enum NOT NULL,
+            access topic_access_enum NOT NULL,
             subscriptions JSONB,
-            status topic_status_enum NOT NULL DEFAULT 'Active',
-            meta JSONB DEFAULT '{}'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            can_unsubscribe BOOLEAN DEFAULT FALSE,
-            can_publish BOOLEAN DEFAULT FALSE,
-            is_subscription_allowed BOOLEAN DEFAULT FALSE,
+            status topic_status_enum NOT NULL,
+            meta JSONB,
+            tags TEXT[],
+            can_unsubscribe BOOLEAN,
+            can_publish BOOLEAN,
+            is_subscription_allowed BOOLEAN,
             handle VARCHAR(255),
             owner_id UUID,
             parent_id UUID,

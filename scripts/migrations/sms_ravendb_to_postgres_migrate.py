@@ -410,8 +410,9 @@ def extract_sms_fields(
 
     # Recipients (list of {name, mobile})
     raw_recipients = doc.get("Recipients")
-    recipients: List[Dict[str, str]] = []
+    recipients: Optional[List[Dict[str, str]]] = None
     if isinstance(raw_recipients, list):
+        recipients = []
         for item in raw_recipients:
             if isinstance(item, dict):
                 recipients.append(
@@ -551,9 +552,9 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
 
         CREATE TABLE IF NOT EXISTS sms (
             id UUID PRIMARY KEY,
-            gateway sms_gateway_enum NOT NULL DEFAULT 'Unknown',
+            gateway sms_gateway_enum NOT NULL,
             gateway_result VARCHAR(500),
-            recipients JSONB NOT NULL DEFAULT '[]'::jsonb,
+            recipients JSONB,
             message TEXT NOT NULL,
             sms_ref_id VARCHAR(100),
             owner_id UUID,
@@ -567,10 +568,10 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
         CREATE TABLE IF NOT EXISTS sms_message (
             id UUID PRIMARY KEY,
             message TEXT NOT NULL,
-            status sms_message_status_enum NOT NULL DEFAULT 'Pending',
-            status_as_string VARCHAR(50) NOT NULL DEFAULT 'Pending',
-            length INTEGER NOT NULL DEFAULT 0,
-            credits INTEGER NOT NULL DEFAULT 1,
+            status sms_message_status_enum NOT NULL,
+            status_as_string VARCHAR(50) NOT NULL,
+            length INTEGER NOT NULL,
+            credits INTEGER NOT NULL,
             reason TEXT,
             owner_id UUID,
             parent_id UUID,
@@ -645,7 +646,7 @@ def upsert_sms_document(
             sms_id,
             gateway,
             gateway_result_str,
-            Json(recipients),
+            Json(recipients) if recipients is not None else None,
             message,
             sms_ref_id,
             owner_id,

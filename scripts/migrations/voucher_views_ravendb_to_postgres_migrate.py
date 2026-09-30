@@ -236,10 +236,10 @@ def clean_decimal(val: Any) -> Optional[Decimal]:
         return None
 
 
-def clean_string_list(raw_val: Any) -> List[str]:
-    """Ensure raw value is converted to a clean list of strings for TEXT[]."""
+def clean_string_list(raw_val: Any) -> Optional[List[str]]:
+    """Ensure raw value is converted to a clean list of strings for TEXT[], preserving None."""
     if raw_val is None:
-        return []
+        return None
     if isinstance(raw_val, list):
         return [str(item).strip() for item in raw_val if str(item).strip()]
     if isinstance(raw_val, str):
@@ -248,10 +248,10 @@ def clean_string_list(raw_val: Any) -> List[str]:
     return [str(raw_val)]
 
 
-def as_json(value: Any, default_val: Any = None) -> Optional[Json]:
+def as_json(value: Any) -> Optional[Json]:
     """Wrap dict/list for JSONB writes while preserving SQL NULL semantics."""
     if value is None:
-        return Json(default_val) if default_val is not None else None
+        return None
     return Json(value)
 
 
@@ -351,12 +351,12 @@ def extract_voucher_fields(doc: Dict[str, Any]) -> Tuple:
     voucher_type = map_voucher_type(doc.get("Type"))
     date_val = parse_iso_timestamp(doc.get("Date"))
 
-    by_val = as_json(doc.get("By") if isinstance(doc.get("By"), list) else [], default_val=[])
-    to_val = as_json(doc.get("To") if isinstance(doc.get("To"), list) else [], default_val=[])
+    by_val = as_json(doc.get("By"))
+    to_val = as_json(doc.get("To"))
     by_total = clean_decimal(doc.get("ByTotal"))
     to_total = clean_decimal(doc.get("ToTotal"))
 
-    section_val = as_json(doc.get("Section") if isinstance(doc.get("Section"), dict) else {}, default_val={})
+    section_val = as_json(doc.get("Section"))
     tags = clean_string_list(doc.get("Tags"))
     status = map_voucher_status(doc.get("Status"))
     created_on = parse_iso_timestamp(
@@ -415,15 +415,15 @@ def ensure_target_schema(cur: psycopg2.extensions.cursor) -> None:
             description TEXT,
             ref_no VARCHAR(100),
             voucher_no VARCHAR(100),
-            type voucher_type_enum NOT NULL DEFAULT 'Expense',
+            type voucher_type_enum NOT NULL,
             date TIMESTAMPTZ,
-            "by" JSONB DEFAULT '[]'::jsonb,
-            "to" JSONB DEFAULT '[]'::jsonb,
+            "by" JSONB,
+            "to" JSONB,
             by_total NUMERIC(18, 2),
             to_total NUMERIC(18, 2),
-            section JSONB DEFAULT '{}'::jsonb,
-            tags TEXT[] DEFAULT '{}'::text[],
-            status voucher_status_enum NOT NULL DEFAULT 'Active',
+            section JSONB,
+            tags TEXT[],
+            status voucher_status_enum NOT NULL,
             created_on TIMESTAMPTZ NOT NULL
         );
 

@@ -514,15 +514,27 @@ def parse_tag_status(val: Any) -> Optional[str]:
 def parse_user_status(val: Any) -> str:
     if val is None:
         return "Active"
-    m = {"registered": "Active", "active": "Active", "disabled": "Disabled", "locked": "Locked"}
-    return m.get(str(val).strip().lower(), "Active")
+    m = {
+        "-1": "Unknown",
+        "0": "Registered",
+        "1": "Active",
+        "99": "Disabled",
+        "unknown": "Unknown",
+        "registered": "Registered",
+        "active": "Active",
+        "disabled": "Disabled",
+        "locked": "Locked",
+    }
+    return m.get(str(val).strip().lower(), str(val).capitalize() if str(val) else "Active")
 
 
-def parse_user_gender(val: Any) -> str:
-    if val is None:
-        return "NoInfo"
+def parse_user_gender(val: Any) -> Optional[str]:
+    if val is None or val == "":
+        return None
     s = str(val).strip().lower()
-    return {"female": "Female", "male": "Male", "noinfo": "NoInfo"}.get(s, "NoInfo")
+    if s in {"null", "none"}:
+        return None
+    return {"0": "Female", "1": "Male", "90": "NoInfo", "female": "Female", "male": "Male", "noinfo": "NoInfo"}.get(s, str(val).capitalize())
 
 
 def parse_asset_status(val: Any) -> Any:

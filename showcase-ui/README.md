@@ -80,13 +80,13 @@ PG_HOST=localhost
 PG_PORT=5433
 PG_DB=rpg
 PG_USER=postgres
-PG_PASSWORD=ashishku1906
+PG_PASSWORD=your_postgres_password
 
 # RavenDB Cloud Source
-RAVEN_URL=https://a.free.btl.ravendb.cloud
-RAVEN_DB=btl
-RAVEN_CERT_FILE=certs/free.btl.client.certificate.pfx
-RAVEN_CERT_PASSWORD=
+RAVEN_URL=https://your-ravendb-cluster-url
+RAVEN_DB=your_database_name
+RAVEN_CERT_FILE=certs/your_client_certificate.pfx
+RAVEN_CERT_PASSWORD=your_cert_passphrase_if_any
 RAVEN_INSECURE=false
 
 # Port configurations

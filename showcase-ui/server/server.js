@@ -31,7 +31,7 @@ const pgPool = new Pool({
   port: parseInt(process.env.PG_PORT || '5433', 10),
   database: process.env.PG_DB || 'rpg',
   user: process.env.PG_USER || 'postgres',
-  password: process.env.PG_PASSWORD || 'ashishku1906',
+  password: process.env.PG_PASSWORD || '',
   connectionTimeoutMillis: 3000,
   query_timeout: 8000,
 });

@@ -30,8 +30,8 @@ flowchart TD
     end
 
     subgraph DataSources ["Data Layer & Services"]
-        RavenCloud["RavenDB Cloud (Source)\nHTTPS + .pfx Client Cert\na.free.btl.ravendb.cloud"]
-        Postgres["PostgreSQL 16 (Target)\nlocalhost:5433 / 5432\nTables, JSONB & GIN Indexes"]
+        RavenCloud["RavenDB Cloud (Source)\nHTTPS + .pfx Client Cert\n(from .env)"]
+        Postgres["PostgreSQL 16 (Target)\n(Host & Port from .env)\nTables, JSONB & GIN Indexes"]
         NetApi[".NET 10 Web API\nhttp://localhost:5000\nSwagger / Health Endpoint"]
     end
 
@@ -109,9 +109,8 @@ You should see:
 ```text
 =======================================================
 ⚡ CT-RPG Live Backend Bridge listening on port 3001
-   - PostgreSQL: Host=localhost, Port=5433, DB=rpg
-   - RavenDB: URL=https://a.free.btl.ravendb.cloud, DB=btl
-   - Cert: .../scripts/certs/free.btl.client.certificate.pfx
+   - PostgreSQL: Host=localhost, Port=5432, DB=(from .env)
+   - RavenDB: Configured=true, CertLoaded=true
 =======================================================
 ```
 

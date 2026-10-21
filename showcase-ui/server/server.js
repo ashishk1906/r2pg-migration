@@ -28,8 +28,8 @@ app.use(express.json());
 const { Pool } = pg;
 const pgPool = new Pool({
   host: process.env.PG_HOST || 'localhost',
-  port: parseInt(process.env.PG_PORT || '5433', 10),
-  database: process.env.PG_DB || 'rpg',
+  port: parseInt(process.env.PG_PORT || '5432', 10),
+  database: process.env.PG_DB || '',
   user: process.env.PG_USER || 'postgres',
   password: process.env.PG_PASSWORD || '',
   connectionTimeoutMillis: 3000,
@@ -37,15 +37,17 @@ const pgPool = new Pool({
 });
 
 // 2. RavenDB HTTPS Client Agent with .pfx Certificate
-const ravenUrl = (process.env.RAVEN_URL || 'https://a.free.btl.ravendb.cloud').replace(/\/+$/, '');
-const ravenDb = process.env.RAVEN_DB || 'btl';
-const rawCertPath = process.env.RAVEN_CERT_FILE || 'certs/free.btl.client.certificate.pfx';
-const certPath = path.isAbsolute(rawCertPath)
-  ? rawCertPath
-  : path.resolve(__dirname, '../../scripts', rawCertPath);
+const ravenUrl = (process.env.RAVEN_URL || '').replace(/\/+$/, '');
+const ravenDb = process.env.RAVEN_DB || '';
+const rawCertPath = process.env.RAVEN_CERT_FILE || '';
+const certPath = rawCertPath
+  ? (path.isAbsolute(rawCertPath)
+      ? rawCertPath
+      : path.resolve(__dirname, '../../scripts', rawCertPath))
+  : '';
 
 let ravenAgent = null;
-if (fs.existsSync(certPath)) {
+if (certPath && fs.existsSync(certPath)) {
   try {
     const pfxBuffer = fs.readFileSync(certPath);
     ravenAgent = new https.Agent({
@@ -54,11 +56,11 @@ if (fs.existsSync(certPath)) {
       rejectUnauthorized: process.env.RAVEN_INSECURE === 'true' ? false : true,
       timeout: 10000,
     });
-    console.log(`[RavenDB] Client certificate loaded successfully from: ${certPath}`);
+    console.log(`[RavenDB] Client certificate loaded successfully.`);
   } catch (err) {
     console.error(`[RavenDB] Failed to load certificate: ${err.message}`);
   }
-} else {
+} else if (rawCertPath) {
   console.warn(`[RavenDB] Certificate file not found at: ${certPath}`);
 }
 
@@ -173,8 +175,8 @@ app.get('/api/live/status', async (req, res) => {
     timestamp: new Date().toISOString(),
     postgres: {
       online: false,
-      host: `${process.env.PG_HOST || 'localhost'}:${process.env.PG_PORT || '5433'}`,
-      database: process.env.PG_DB || 'rpg',
+      host: `${process.env.PG_HOST || 'localhost'}:${process.env.PG_PORT || '5432'}`,
+      database: process.env.PG_DB || '',
       latencyMs: null,
       error: null,
       details: null,
@@ -438,8 +440,7 @@ app.get('/api/live/summary-view', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`=======================================================`);
   console.log(`⚡ CT-RPG Live Backend Bridge listening on port ${PORT}`);
-  console.log(`   - PostgreSQL: Host=${process.env.PG_HOST || 'localhost'}, Port=${process.env.PG_PORT || '5433'}, DB=${process.env.PG_DB || 'rpg'}`);
-  console.log(`   - RavenDB: URL=${ravenUrl}, DB=${ravenDb}`);
-  console.log(`   - Cert: ${certPath}`);
+  console.log(`   - PostgreSQL: Host=${process.env.PG_HOST || 'localhost'}, Port=${process.env.PG_PORT || '5432'}, DB=${process.env.PG_DB || '(from .env)'}`);
+  console.log(`   - RavenDB: Configured=${Boolean(ravenUrl && ravenDb)}, CertLoaded=${Boolean(ravenAgent)}`);
   console.log(`=======================================================`);
 });

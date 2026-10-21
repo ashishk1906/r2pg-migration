@@ -16,10 +16,11 @@ A complete, production-ready demonstration of migrating school and fee managemen
    - [Step 4: Verify Data Parity (RavenDB vs PostgreSQL)](#step-4-verify-data-parity-ravendb-vs-postgresql)
    - [Step 5: Run Automated Unit & Integration Tests](#step-5-run-automated-unit--integration-tests)
    - [Step 6: Execute REST API Tests](#step-6-execute-rest-api-tests)
-5. [Database Schema, Views, Indexes & Triggers](#-database-schema-views-indexes--triggers)
-6. [API Endpoint Reference](#-api-endpoint-reference)
-7. [Repository Structure](#-repository-structure)
-8. [Troubleshooting & FAQ](#-troubleshooting--faq)
+5. [🖥️ Live Migration Studio (Web UI)](#️-live-migration-studio-web-ui)
+6. [Database Schema, Views, Indexes & Triggers](#-database-schema-views-indexes--triggers)
+7. [API Endpoint Reference](#-api-endpoint-reference)
+8. [Repository Structure](#-repository-structure)
+9. [Troubleshooting & FAQ](#-troubleshooting--faq)
 
 ---
 
@@ -246,6 +247,32 @@ curl.exe -s -X POST "http://localhost:5000/api/feeTx" \
   }'
 ```
 
+---
+
+## 🖥️ Live Migration Studio (Web UI)
+
+The repository includes a modern, real-time web studio ([showcase-ui](file:///c:/Users/aks89/Desktop/CT-RPG/showcase-ui/README.md)) to inspect side-by-side live data parity, RQL vs SQL queries, JSONB breakdowns, and schema conversions across all 42 migrated domains.
+
+```bash
+# Navigate to the showcase UI directory
+cd showcase-ui
+
+# Install dependencies (first-time only)
+npm install
+
+# Start the Express live backend bridge (Terminal 1)
+npm run server
+
+# Start the React frontend application (Terminal 2)
+npm run dev
+```
+
+Visit **`http://localhost:5173`** in your browser:
+- **🟢 Direct Live Database Queries**: Queries live documents from RavenDB Cloud (`from "<Collection>" order by id()`) and live rows from PostgreSQL 16 (`SELECT * FROM <table> ORDER BY id ASC`) with deterministic 1:1 record pairing.
+- **Dynamic DDL & Triggers**: Automatically extracts schema definitions and active triggers from PostgreSQL catalog tables.
+- **AI Copilot**: Integrated assistant for schema explanations, RQL-to-SQL translation, and JSONB LATERAL queries.
+
+👉 **Full UI Documentation & Architecture**: See [`showcase-ui/README.md`](file:///c:/Users/aks89/Desktop/CT-RPG/showcase-ui/README.md).
 
 ---
 
@@ -308,6 +335,12 @@ CT-RPG/
 │       ├── exams_ravendb_to_postgres_migrate.py
 │       ├── personas_ravendb_to_postgres_migrate.py
 │       └── ...
+│
+├── showcase-ui/                    # Interactive Parity & Migration Studio (React + Express)
+│   ├── README.md                   # Full UI architecture and running guide
+│   ├── package.json                # React 19, Vite, Express, pg client
+│   ├── server/server.js            # Express Live Backend Bridge (PostgreSQL + RavenDB)
+│   └── src/                        # React SPA, Panes, Transformation Matrix, AI Copilot
 │
 └── student-fee-poc/                # .NET Web API & PostgreSQL POC
     ├── README.md                   # Module-specific documentation

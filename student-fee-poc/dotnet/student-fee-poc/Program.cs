@@ -26,7 +26,7 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "CampusTrack Parity API (Student & Fee Module)",
         Version = "v1",
-        Description = "Parity REST APIs for Student and Fee modules matching CampusTrack product endpoints, powered by PostgreSQL 16 & ASP.NET Core 10."
+        Description = "Parity REST APIs for Student and Fee modules matching CampusTrack product endpoints, powered by PostgreSQL & ASP.NET Core 10."
     });
 });
 

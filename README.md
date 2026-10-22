@@ -47,7 +47,7 @@ A complete, production-ready demonstration of migrating school and fee managemen
                                           │
                                           ▼
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ PostgreSQL 16 (Port 5432)                                                              │
+│ PostgreSQL (Port 5432)                                                                 │
 │                                                                                        │
 │  Base Tables (Created & Loaded by Migration):                                          │
 │    ├── student               (GIN Index on enrollments JSONB)                          │
@@ -271,7 +271,7 @@ npm run dev
 ```
 
 Visit **`http://localhost:5173`** in your browser:
-- **🟢 Direct Live Database Queries**: Queries live documents from RavenDB Cloud (`from "<Collection>" order by id()`) and live rows from PostgreSQL 16 (`SELECT * FROM <table> ORDER BY id ASC`) with deterministic 1:1 record pairing.
+- **🟢 Direct Live Database Queries**: Queries live documents from RavenDB Cloud (`from "<Collection>" order by id()`) and live rows from PostgreSQL (`SELECT * FROM <table> ORDER BY id ASC`) with deterministic 1:1 record pairing.
 - **Dynamic DDL & Triggers**: Automatically extracts schema definitions and active triggers from PostgreSQL catalog tables.
 - **AI Copilot**: Integrated assistant for schema explanations, RQL-to-SQL translation, and JSONB LATERAL queries.
 

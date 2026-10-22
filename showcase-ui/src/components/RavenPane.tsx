@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import type { CollectionSummary } from '../types/migration';
 import { Flame, Copy, Check, Code, Info, Terminal, FileCode2 } from 'lucide-react';
 
@@ -12,6 +12,10 @@ export const RavenPane: React.FC<RavenPaneProps> = ({ collection, docIndex }) =>
   const [copied, setCopied] = useState(false);
 
   const activeDoc = collection.sampleDocuments[docIndex] || collection.sampleDocuments[0];
+
+  const formattedJson = useMemo(() => {
+    return activeDoc?.data ? JSON.stringify(activeDoc.data, null, 2) : '';
+  }, [activeDoc]);
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -71,7 +75,7 @@ export const RavenPane: React.FC<RavenPaneProps> = ({ collection, docIndex }) =>
         <div className="subtab-action">
           <button
             className="copy-btn"
-            onClick={() => handleCopy(JSON.stringify(activeDoc?.data, null, 2))}
+            onClick={() => handleCopy(formattedJson)}
             title="Copy document content"
           >
             {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
@@ -81,13 +85,39 @@ export const RavenPane: React.FC<RavenPaneProps> = ({ collection, docIndex }) =>
       </div>
 
       <div className="pane-content-body">
-        {activeTab === 'json' && (
-          <div className="code-viewer-container">
-            <pre className="code-block json-syntax">
-              <code>{JSON.stringify(activeDoc?.data, null, 2)}</code>
-            </pre>
+        {!activeDoc ? (
+          <div className="empty-disconnected-state">
+            <div className="empty-icon-circle raven-empty">
+              <Flame size={32} />
+            </div>
+            <h3>RavenDB is Not Connected</h3>
+            <p>
+              No live records were retrieved for collection <strong>"{collection.ravenCollection}"</strong> from RavenDB Cloud.
+            </p>
+            <div className="connection-checklist">
+              <div className="check-item">
+                <span className="step-num">1</span>
+                <span>Verify that <code>RAVEN_URL</code> and <code>RAVEN_DB</code> are set in <code>.env</code>.</span>
+              </div>
+              <div className="check-item">
+                <span className="step-num">2</span>
+                <span>Ensure your client certificate (<code>.pfx</code>) is placed in <code>scripts/certs/</code>.</span>
+              </div>
+              <div className="check-item">
+                <span className="step-num">3</span>
+                <span>Start the live backend bridge server: <code>npm run server</code>.</span>
+              </div>
+            </div>
           </div>
-        )}
+        ) : (
+          <>
+            {activeTab === 'json' && (
+              <div className="code-viewer-container">
+                <pre className="code-block json-syntax">
+                  <code>{formattedJson}</code>
+                </pre>
+              </div>
+            )}
 
         {activeTab === 'metadata' && (
           <div className="metadata-container">
@@ -162,7 +192,9 @@ export const RavenPane: React.FC<RavenPaneProps> = ({ collection, docIndex }) =>
             </div>
           </div>
         )}
-      </div>
-    </div>
-  );
+      </>
+    )}
+  </div>
+</div>
+);
 };

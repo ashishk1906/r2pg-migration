@@ -1,15 +1,12 @@
-import { useState, useEffect } from 'react';
-import { collectionSummaries, migrationStats, allAuditedDomainsList } from './data/migrationData';
+import { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header';
 import { DomainSelector } from './components/DomainSelector';
 import { ParityBar } from './components/ParityBar';
 import { RavenPane } from './components/RavenPane';
 import { PostgresPane } from './components/PostgresPane';
-import { LiveTransformationView } from './components/LiveTransformationView';
 import { AiChat } from './components/AiChat';
 import { ParityAuditModal } from './components/ParityAuditModal';
-import { DiffModal } from './components/DiffModal';
-import type { CollectionSummary, RavenDocument, PostgresRow, FieldMapping } from './types/migration';
+import type { CollectionSummary, RavenDocument, PostgresRow } from './types/migration';
 
 interface LiveStatus {
   postgres: { online: boolean; latencyMs?: number };
@@ -17,50 +14,63 @@ interface LiveStatus {
   api: { online: boolean };
 }
 
-// Helper to reliably resolve table and collection names
-function resolveDomain(id: string) {
-  const cleanId = (id || 'student').toLowerCase().trim();
+// Helper to dynamically resolve table and collection names from live database domains
+function resolveDomain(id: string, liveDomains: any[] = []) {
+  const cleanId = (id || '').toLowerCase().trim();
 
-  const matchedPreset = collectionSummaries.find(
-    c => c.id.toLowerCase() === cleanId ||
-         c.postgresTable.toLowerCase() === cleanId ||
-         c.ravenCollection.toLowerCase() === cleanId ||
-         (cleanId.endsWith('s') && c.postgresTable.toLowerCase() === cleanId.slice(0, -1))
+  const found = liveDomains.find(
+    d => (d.table && d.table.toLowerCase() === cleanId) ||
+         (d.collection && d.collection.toLowerCase() === cleanId) ||
+         (d.domain && d.domain.toLowerCase() === cleanId)
   );
 
-  const domainDef = allAuditedDomainsList.find(
-    d => d.table.toLowerCase() === cleanId ||
-         d.collection.toLowerCase() === cleanId ||
-         d.domain.toLowerCase() === cleanId ||
-         (cleanId.endsWith('s') && d.table.toLowerCase() === cleanId.slice(0, -1)) ||
-         (d.table.toLowerCase().endsWith('s') && cleanId === d.table.toLowerCase().slice(0, -1))
-  ) || {
-    domain: matchedPreset?.name || 'Students',
-    collection: matchedPreset?.ravenCollection || 'Students',
-    table: matchedPreset?.postgresTable || 'student',
-    count: matchedPreset?.documentCount || 538,
-    fields: 25,
+  if (found) {
+    return {
+      domainDef: found,
+      currentTableName: found.table || cleanId,
+      currentCollectionName: found.collection || cleanId,
+    };
+  }
+
+  return {
+    domainDef: { domain: id || 'None', collection: id || '', table: id || '' },
+    currentTableName: id,
+    currentCollectionName: id,
   };
-
-  const currentTableName = matchedPreset?.postgresTable || domainDef.table;
-  const currentCollectionName = matchedPreset?.ravenCollection || domainDef.collection;
-
-  return { matchedPreset, domainDef, currentTableName, currentCollectionName };
 }
 
+const initialEmptyCollection: CollectionSummary = {
+  id: '',
+  name: 'No Collection Selected',
+  ravenCollection: '',
+  postgresTable: '',
+  documentCount: 0,
+  rowCount: 0,
+  matchedCount: 0,
+  missingInPg: 0,
+  extraInPg: 0,
+  fieldMismatches: 0,
+  status: 'PENDING',
+  primaryKey: 'id',
+  sampleDocuments: [],
+  sampleRows: [],
+  ddl: '',
+  triggers: '',
+  indexes: [],
+};
+
 export function App() {
-  const [selectedCollectionId, setSelectedCollectionId] = useState<string>('student');
+  const [selectedCollectionId, setSelectedCollectionId] = useState<string>('');
   const [selectedDocIndex, setSelectedDocIndex] = useState<number>(0);
   const [isAuditing, setIsAuditing] = useState<boolean>(false);
   const [isAuditModalOpen, setIsAuditModalOpen] = useState<boolean>(false);
-  const [isDiffModalOpen, setIsDiffModalOpen] = useState<boolean>(false);
-  const [viewMode, setViewMode] = useState<'split' | 'transformation'>('split');
   const [isLoadingDomain, setIsLoadingDomain] = useState<boolean>(false);
 
-  // Live Connection & Data State (Always Live)
+  // Live Connection & Data State (100% Dynamic from PostgreSQL & RavenDB)
   const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
-  const [activeCollectionData, setActiveCollectionData] = useState<CollectionSummary>(collectionSummaries[0]);
+  const [activeCollectionData, setActiveCollectionData] = useState<CollectionSummary>(initialEmptyCollection);
   const [liveDomainsStats, setLiveDomainsStats] = useState<any[]>([]);
+  const domainCacheRef = useRef<Record<string, CollectionSummary>>({});
 
   // 1. Poll live backend status every 8 seconds
   useEffect(() => {
@@ -105,43 +115,62 @@ export function App() {
           const data = await res.json();
           if (data.domains && data.domains.length > 0) {
             setLiveDomainsStats(data.domains);
+            setSelectedCollectionId(prev => {
+              if (prev && data.domains.some((d: any) => d.table === prev || d.collection === prev)) {
+                return prev;
+              }
+              return data.domains[0].table || data.domains[0].collection;
+            });
+          } else {
+            setLiveDomainsStats([]);
           }
         }
       } catch (err) {
-        console.warn('Could not load live domains stats:', err);
+        if (isMounted) setLiveDomainsStats([]);
       }
     };
     fetchDomains();
+    const interval = setInterval(fetchDomains, 8000);
     return () => {
       isMounted = false;
+      clearInterval(interval);
     };
   }, []);
 
   // 3. Fetch real live documents and PostgreSQL rows whenever selected domain changes
   useEffect(() => {
     let isCancelled = false;
-    const { matchedPreset, domainDef, currentTableName, currentCollectionName } = resolveDomain(selectedCollectionId);
+    if (!selectedCollectionId) {
+      setActiveCollectionData(initialEmptyCollection);
+      return;
+    }
+
+    const { domainDef, currentTableName, currentCollectionName } = resolveDomain(selectedCollectionId, liveDomainsStats);
+
+    const cacheKey = currentTableName;
+    if (domainCacheRef.current[cacheKey]) {
+      setActiveCollectionData(domainCacheRef.current[cacheKey]);
+      setIsLoadingDomain(false);
+    }
 
     const fetchLiveCollection = async () => {
       try {
         const [pgRes, ravenRes] = await Promise.allSettled([
-          fetch(`http://localhost:3001/api/live/postgres/${currentTableName}?limit=25`),
-          fetch(`http://localhost:3001/api/live/raven/${encodeURIComponent(currentCollectionName)}?limit=25`),
+          fetch(`http://localhost:3001/api/live/postgres/${currentTableName}?limit=all`),
+          fetch(`http://localhost:3001/api/live/raven/${encodeURIComponent(currentCollectionName)}?limit=all`),
         ]);
 
         let liveRows: PostgresRow[] = [];
         let liveDocs: RavenDocument[] = [];
-        let ddl = matchedPreset?.ddl || '';
-        let triggers = matchedPreset?.triggers || '';
-        let columnTypes: Record<string, string> = {};
-        let totalDocsCount = matchedPreset?.documentCount || 0;
-        let totalRowsCount = matchedPreset?.rowCount || 0;
+        let ddl = '';
+        let triggers = '';
+        let totalDocsCount = 0;
+        let totalRowsCount = 0;
 
         // Process Live PostgreSQL Rows
         if (pgRes.status === 'fulfilled' && pgRes.value.ok) {
           const pgData = await pgRes.value.json();
           totalRowsCount = pgData.totalCount !== undefined ? pgData.totalCount : pgData.rows?.length || 0;
-          columnTypes = pgData.columnTypes || {};
           if (pgData.ddl) ddl = pgData.ddl;
           if (pgData.triggers && pgData.triggers.length > 0) {
             triggers = pgData.triggers
@@ -150,13 +179,20 @@ export function App() {
           }
 
           if (pgData.rows && pgData.rows.length > 0) {
+            const jsonbColNames = new Set(
+              Object.entries(pgData.columnTypes || {})
+                .filter(([_, t]) => t === 'jsonb')
+                .map(([col]) => col)
+            );
+
             liveRows = pgData.rows.map((row: any) => {
               const detectedJsonb: Record<string, any> = {};
-              Object.entries(row).forEach(([k, v]) => {
-                if ((v !== null && typeof v === 'object') || pgData.columnTypes?.[k] === 'jsonb') {
-                  detectedJsonb[k] = v;
+              for (const key in row) {
+                const val = row[key];
+                if ((val !== null && typeof val === 'object') || jsonbColNames.has(key)) {
+                  detectedJsonb[key] = val;
                 }
-              });
+              }
 
               return {
                 id: row.id || row.student_id || row.fee_id || row.fee_transaction_id || 'unknown',
@@ -189,57 +225,8 @@ export function App() {
           }
         }
 
-        // Generate dynamic field mappings between RavenDB doc and PG row
-        const fieldMappings: FieldMapping[] = [];
-        if (liveDocs.length > 0 && liveRows.length > 0) {
-          const sampleDoc = liveDocs[0].data;
-          const sampleRow = liveRows[0].data;
-
-          Object.keys(sampleDoc).forEach((key) => {
-            if (key.startsWith('@')) return;
-            const snakeKey = key.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '');
-            const targetCol = sampleRow[snakeKey] !== undefined ? snakeKey : (sampleRow[key.toLowerCase()] !== undefined ? key.toLowerCase() : null);
-
-            if (targetCol) {
-              const srcVal = sampleDoc[key];
-              const tgtVal = sampleRow[targetCol];
-              const isArray = Array.isArray(srcVal);
-              const isObj = srcVal !== null && typeof srcVal === 'object' && !isArray;
-
-              let rule: any = 'direct';
-              if (key.toLowerCase() === 'id' || key.toLowerCase().endsWith('id')) rule = 'uuid_parse';
-              else if (isArray || isObj) rule = 'jsonb_lateral';
-              else if (typeof srcVal === 'string' && (srcVal.includes('T') || srcVal.includes('0001-01'))) rule = 'datetime_utc';
-              else if (key !== targetCol) rule = 'case_conversion';
-
-              fieldMappings.push({
-                ravenField: key,
-                postgresColumn: targetCol,
-                sourceType: isArray ? 'Array' : isObj ? 'Object' : typeof srcVal,
-                targetType: columnTypes[targetCol] || (isArray || isObj ? 'jsonb' : 'varchar'),
-                transformRule: rule,
-                sourceValue: srcVal,
-                targetValue: tgtVal,
-                isMatched: true,
-              });
-            }
-          });
-        }
-
-        // Merge any predefined rich field notes if available
-        if (matchedPreset?.fieldMappings) {
-          matchedPreset.fieldMappings.forEach((presetMapping) => {
-            const existingIdx = fieldMappings.findIndex(f => f.ravenField.toLowerCase() === presetMapping.ravenField.toLowerCase());
-            if (existingIdx >= 0) {
-              fieldMappings[existingIdx].notes = presetMapping.notes;
-            } else {
-              fieldMappings.push(presetMapping);
-            }
-          });
-        }
-
         if (!isCancelled) {
-          setActiveCollectionData({
+          const newData: CollectionSummary = {
             id: currentTableName,
             name: domainDef.domain,
             ravenCollection: currentCollectionName,
@@ -250,15 +237,17 @@ export function App() {
             missingInPg: Math.max(0, totalDocsCount - totalRowsCount),
             extraInPg: Math.max(0, totalRowsCount - totalDocsCount),
             fieldMismatches: 0,
-            status: totalDocsCount === totalRowsCount && totalDocsCount > 0 ? 'PASS' : 'PASS',
-            primaryKey: 'id (UUID)',
-            sampleDocuments: liveDocs.length > 0 ? liveDocs : (matchedPreset?.sampleDocuments || []),
-            sampleRows: liveRows.length > 0 ? liveRows : (matchedPreset?.sampleRows || []),
-            fieldMappings: fieldMappings.length > 0 ? fieldMappings : (matchedPreset?.fieldMappings || []),
+            status: totalDocsCount === totalRowsCount && totalDocsCount > 0 ? 'PASS' : (totalDocsCount === 0 && totalRowsCount === 0 ? 'PENDING' : 'FAIL'),
+            primaryKey: 'id',
+            sampleDocuments: liveDocs,
+            sampleRows: liveRows,
             ddl,
             triggers,
-            indexes: matchedPreset?.indexes || [`idx_${currentTableName}_id (B-Tree)`],
-          });
+            indexes: [`idx_${currentTableName}_id (B-Tree)`],
+          };
+
+          domainCacheRef.current[cacheKey] = newData;
+          setActiveCollectionData(newData);
         }
       } catch (err) {
         console.error('Failed to query live database data:', err);
@@ -273,11 +262,9 @@ export function App() {
     return () => {
       isCancelled = true;
     };
-  }, [selectedCollectionId]);
+  }, [selectedCollectionId, liveDomainsStats]);
 
   const currentCollection = activeCollectionData;
-  const activeDoc = currentCollection.sampleDocuments[selectedDocIndex] || currentCollection.sampleDocuments[0];
-  const activeRow = currentCollection.sampleRows[selectedDocIndex] || currentCollection.sampleRows[0];
 
   const handleRunAudit = () => {
     setIsAuditing(true);
@@ -286,15 +273,47 @@ export function App() {
     }, 1200);
   };
 
+  const isDatabasesOnline = Boolean(liveStatus?.postgres.online && liveStatus?.raven.online);
+
+  // Dynamic domains derived strictly from live discovered domains (filtering out RavenDB @ system collections)
+  const validLiveDomains = liveDomainsStats.filter(d => !d.collection?.startsWith('@'));
+
+  const dynamicTabs: CollectionSummary[] = validLiveDomains.map(tab => {
+    const docCount = typeof tab.ravenCount === 'number' ? tab.ravenCount : 0;
+    const rowCount = typeof tab.pgCount === 'number' ? tab.pgCount : 0;
+
+    return {
+      id: tab.table || tab.collection,
+      name: tab.domain || tab.collection,
+      ravenCollection: tab.collection,
+      postgresTable: tab.table,
+      documentCount: isDatabasesOnline ? docCount : 0,
+      rowCount: isDatabasesOnline ? rowCount : 0,
+      matchedCount: isDatabasesOnline ? Math.min(docCount, rowCount) : 0,
+      missingInPg: isDatabasesOnline ? Math.max(0, docCount - rowCount) : 0,
+      extraInPg: isDatabasesOnline ? Math.max(0, rowCount - docCount) : 0,
+      fieldMismatches: 0,
+      status: isDatabasesOnline && docCount > 0 && docCount === rowCount ? 'PASS' : 'PENDING',
+      primaryKey: tab.idCol || 'id',
+      sampleDocuments: [],
+      sampleRows: [],
+      ddl: '',
+      triggers: '',
+      indexes: [],
+    };
+  });
+
   return (
     <div className="app-layout">
       {/* Top Header */}
       <Header
         stats={{
-          ...migrationStats,
-          totalDocumentsInRaven: currentCollection.documentCount || 2210,
-          totalRowsInPostgres: currentCollection.rowCount || 2210,
-          totalMatchedIds: Math.min(currentCollection.documentCount, currentCollection.rowCount) || 2210,
+          timestampUtc: new Date().toISOString(),
+          collectionsAuditedCount: isDatabasesOnline && validLiveDomains.length > 0 ? validLiveDomains.length : 0,
+          totalDocumentsInRaven: isDatabasesOnline ? (validLiveDomains.reduce((acc, d) => acc + (typeof d.ravenCount === 'number' ? d.ravenCount : 0), 0) || currentCollection.documentCount) : 0,
+          totalRowsInPostgres: isDatabasesOnline ? (validLiveDomains.reduce((acc, d) => acc + (typeof d.pgCount === 'number' ? d.pgCount : 0), 0) || currentCollection.rowCount) : 0,
+          totalMatchedIds: isDatabasesOnline ? (validLiveDomains.reduce((acc, d) => acc + Math.min(typeof d.ravenCount === 'number' ? d.ravenCount : 0, typeof d.pgCount === 'number' ? d.pgCount : 0), 0) || Math.min(currentCollection.documentCount, currentCollection.rowCount)) : 0,
+          overallStatus: (isDatabasesOnline && currentCollection.documentCount > 0) ? 'PASS' : 'PENDING',
         }}
         onRunAudit={handleRunAudit}
         onOpenAuditModal={() => setIsAuditModalOpen(true)}
@@ -304,7 +323,8 @@ export function App() {
 
       {/* Domain & Record Selector Bar */}
       <DomainSelector
-        collections={collectionSummaries}
+        collections={dynamicTabs}
+        allDomains={liveDomainsStats}
         activeCollection={currentCollection}
         selectedCollectionId={selectedCollectionId}
         onSelectCollection={(id) => {
@@ -314,46 +334,54 @@ export function App() {
         }}
         selectedDocIndex={selectedDocIndex}
         onSelectDocIndex={setSelectedDocIndex}
-        viewMode={viewMode}
-        onToggleViewMode={setViewMode}
       />
 
-      {/* Central Parity Sync & Diff Bar */}
+      {/* Central Parity Status Bar */}
       <ParityBar
         collection={currentCollection}
-        onOpenDiffModal={() => setIsDiffModalOpen(true)}
       />
 
-      {/* Main Workspace (Dual Panes OR Live Transformation Matrix) */}
+      {/* Database Connection Notice Banner */}
+      {liveStatus && (!liveStatus.postgres.online || !liveStatus.raven.online) && (
+        <div className="db-alert-banner">
+          <div className="db-alert-content">
+            <span className="db-alert-icon">⚠️</span>
+            <div className="db-alert-text">
+              <strong>Database Connection Notice:</strong>{' '}
+              {!liveStatus.postgres.online && !liveStatus.raven.online ? (
+                <span>Neither PostgreSQL nor RavenDB Cloud is connected.Please connect to  PostgreSQL and RavenDB server</span>
+              ) : !liveStatus.postgres.online ? (
+                <span>PostgreSQL is not reachable. Please connect to PostgreSQL server.</span>
+              ) : (
+                <span>RavenDB Cloud is not reachable. Please connect to RavenDB server.</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main Workspace (Dual Panes: Live RavenDB Document vs Live PostgreSQL Row) */}
       <main className="panes-workspace">
         {isLoadingDomain && (
           <div className="syncing-indicator-bar">
             <span className="syncing-dot"></span>
-            <span>Syncing live records from RavenDB Cloud & PostgreSQL 16...</span>
+            <span>Syncing live records from RavenDB Cloud & PostgreSQL...</span>
           </div>
         )}
 
-        {viewMode === 'split' ? (
-          <div className="panes-container">
-            {/* Left Pane: RavenDB Live Document */}
-            <RavenPane
-              collection={currentCollection}
-              docIndex={selectedDocIndex}
-            />
-
-            {/* Right Pane: PostgreSQL Live Row */}
-            <PostgresPane
-              collection={currentCollection}
-              docIndex={selectedDocIndex}
-            />
-          </div>
-        ) : (
-          <LiveTransformationView
+        <div className="panes-container">
+          {/* Left Pane: RavenDB Live Document */}
+          <RavenPane
             collection={currentCollection}
-            doc={activeDoc}
-            row={activeRow}
+            docIndex={selectedDocIndex}
           />
-        )}
+
+          {/* Right Pane: PostgreSQL Live Row */}
+          <PostgresPane
+            collection={currentCollection}
+            docIndex={selectedDocIndex}
+          />
+        </div>
       </main>
 
       {/* AI Copilot Chat Drawer */}
@@ -362,17 +390,11 @@ export function App() {
         docIndex={selectedDocIndex}
       />
 
-      {/* Modals */}
+      {/* Live Parity Audit Modal */}
       <ParityAuditModal
         isOpen={isAuditModalOpen}
         onClose={() => setIsAuditModalOpen(false)}
         liveDomains={liveDomainsStats}
-      />
-
-      <DiffModal
-        isOpen={isDiffModalOpen}
-        onClose={() => setIsDiffModalOpen(false)}
-        collection={currentCollection}
       />
     </div>
   );

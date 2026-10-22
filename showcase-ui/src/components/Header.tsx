@@ -50,7 +50,7 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           </div>
           <div className="brand-subtitle">
-            Real-time RavenDB (NoSQL) ➔ PostgreSQL 16 + ASP.NET Core 10 Parity
+            Real-time RavenDB (NoSQL) ➔ PostgreSQL Parity
           </div>
         </div>
       </div>
@@ -62,7 +62,7 @@ export const Header: React.FC<HeaderProps> = ({
           <span className={`status-dot ${isRavenOnline ? 'green' : 'red'}`}></span>
         </div>
         <div className="arrow-separator">➔</div>
-        <div className={`status-badge target-badge ${isPgOnline ? 'online' : 'offline'}`} title="Connected to PostgreSQL 16 on localhost:5433">
+        <div className={`status-badge target-badge ${isPgOnline ? 'online' : 'offline'}`} title="Connected to PostgreSQL on localhost:5433">
           <Database size={14} className="badge-icon-pg" />
           <span>PostgreSQL {liveStatus?.postgres.latencyMs ? `(${liveStatus.postgres.latencyMs}ms)` : ''}</span>
           <span className={`status-dot ${isPgOnline ? 'green' : 'red'}`}></span>
@@ -78,13 +78,27 @@ export const Header: React.FC<HeaderProps> = ({
         <button 
           className="metric-pill" 
           onClick={onOpenAuditModal}
-          title="Click to view all 42 audited domains"
+          title="Click to view audited domains"
         >
-          <CheckCircle2 size={16} className="text-success" />
-          <span className="metric-text">
-            <strong>{stats.collectionsAuditedCount}/{stats.collectionsAuditedCount} Domains</strong> ({stats.totalDocumentsInRaven.toLocaleString()} Records)
-          </span>
-          <span className="badge-pass">100% {stats.overallStatus}</span>
+          {isPgOnline && isRavenOnline && stats.collectionsAuditedCount > 0 ? (
+            <>
+              <CheckCircle2 size={16} className="text-success" />
+              <span className="metric-text">
+                <strong>{stats.collectionsAuditedCount} Domains Synced</strong> ({stats.totalDocumentsInRaven.toLocaleString()} Live Records)
+              </span>
+              <span className="badge-pass">100% {stats.overallStatus}</span>
+            </>
+          ) : (
+            <>
+              <Radio size={16} className="text-warning" />
+              <span className="metric-text">
+                <strong>0 Connected Domains</strong> (0 Live Records)
+              </span>
+              <span className="badge-pass" style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', borderColor: 'rgba(239, 68, 68, 0.3)' }}>
+                DISCONNECTED
+              </span>
+            </>
+          )}
         </button>
 
         <button 

@@ -64,51 +64,28 @@ if (certPath && fs.existsSync(certPath)) {
   console.warn(`[RavenDB] Certificate file not found at: ${certPath}`);
 }
 
-// Canonical mapping between RavenDB collections and PostgreSQL tables
-export const DOMAIN_MAP = [
-  { domain: 'Students', collection: 'Students', table: 'student', idCol: 'student_id' },
-  { domain: 'Fees', collection: 'Fees', table: 'fee', idCol: 'id' },
-  { domain: 'Fee Transactions', collection: 'FeeTxes', table: 'fee_transaction', idCol: 'id' },
-  { domain: 'Courses', collection: 'Courses', table: 'course', idCol: 'id' },
-  { domain: 'Applications', collection: 'Applications', table: 'applications', idCol: 'id' },
-  { domain: 'Personas', collection: 'Personas', table: 'persona', idCol: 'id' },
-  { domain: 'Organizations', collection: 'Orgs', table: 'organization', idCol: 'id' },
-  { domain: 'Institutes', collection: 'Institutes', table: 'institute', idCol: 'id' },
-  { domain: 'Exams', collection: 'Exams', table: 'exam', idCol: 'id' },
-  { domain: 'Staffs', collection: 'Staffs', table: 'staffs', idCol: 'id' },
-  { domain: 'Attendance Events', collection: 'AttendanceEvents', table: 'attendance_event', idCol: 'id' },
-  { domain: 'Assessments', collection: 'Assessments', table: 'assessments', idCol: 'id' },
-  { domain: 'Inventory Items', collection: 'InventoryItemViews', table: 'inventory_item_views', idCol: 'id' },
-  { domain: 'Ledger Accounts', collection: 'LedgerAccountViews', table: 'ledger_account_views', idCol: 'id' },
-  { domain: 'Receipts', collection: 'Receipts', table: 'receipts', idCol: 'id' },
-  { domain: 'Questions (QA)', collection: 'Questions', table: 'questions', idCol: 'id' },
-  { domain: 'Topics', collection: 'Topics', table: 'topics', idCol: 'id' },
-  { domain: 'Voucher Views', collection: 'VoucherViews', table: 'voucher_views', idCol: 'id' },
-  { domain: 'Users', collection: 'Users', table: 'users', idCol: 'id' },
-  { domain: 'SMS Messages', collection: 'SmsMessages', table: 'sms_message', idCol: 'id' },
-  { domain: 'SMS Config', collection: 'SMs', table: 'sms', idCol: 'id' },
-  { domain: 'Emails', collection: 'Emails', table: 'email', idCol: 'id' },
-  { domain: 'Asset Views', collection: 'AssetViews', table: 'asset_views', idCol: 'id' },
-  { domain: 'Member Views', collection: 'MemberViews', table: 'member_views', idCol: 'id' },
-  { domain: 'Material Views', collection: 'MaterialViews', table: 'material_views', idCol: 'id' },
-  { domain: 'Circulation Views', collection: 'CirculationViews', table: 'circulation_views', idCol: 'id' },
-  { domain: 'Institute Calendars', collection: 'InstituteCalendars', table: 'institute_calendars', idCol: 'id' },
-  { domain: 'Calendar Rules', collection: 'CalendarRules', table: 'calendar_rules', idCol: 'id' },
-  { domain: 'Application Form Templates', collection: 'ApplicationFormTemplates', table: 'application_form_templates', idCol: 'id' },
-  { domain: 'Artefacts', collection: 'Artefacts', table: 'artefacts', idCol: 'id' },
-  { domain: 'Artefact Tags', collection: 'ArtefactTags', table: 'artefact_tags', idCol: 'id' },
-  { domain: 'Assessment Tags', collection: 'AssessmentTags', table: 'assessment_tags', idCol: 'id' },
-  { domain: 'Content Tags', collection: 'ContentTags', table: 'content_tags', idCol: 'id' },
-  { domain: 'QA Tags', collection: 'QATags', table: 'qa_tags', idCol: 'id' },
-  { domain: 'Image Tags', collection: 'ImageTags', table: 'image_tags', idCol: 'id' },
-  { domain: 'Seat Matrices', collection: 'SeatMatrices', table: 'seat_matrices', idCol: 'id' },
-  { domain: 'Gradings', collection: 'Gradings', table: 'gradings', idCol: 'id' },
-  { domain: 'Commits', collection: 'Commits', table: 'commits', idCol: 'id' },
-  { domain: 'Commit ACs', collection: 'CommitAcs', table: 'commit_ac', idCol: 'id' },
-  { domain: 'Commit Assets', collection: 'CommitAssets', table: 'commit_asset', idCol: 'id' },
-  { domain: 'Inventory Journals', collection: 'InventoryJournalViews', table: 'inventory_journal_views', idCol: 'id' },
-  { domain: 'Random Questions', collection: 'RandomQuestionSubmissions', table: 'random_question_submissions', idCol: 'id' },
-];
+// Dynamic title formatter: converts snake_case or PascalCase to human-readable title
+function formatDomainTitle(name) {
+  if (!name) return 'Unknown';
+  return name
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, l => l.toUpperCase())
+    .trim();
+}
+
+// Normalized alphanumeric key for dynamic pairing without hardcoding
+function toMatchKey(str) {
+  if (!str) return '';
+  let k = str.toLowerCase().replace(/[^a-z0-9]/g, '');
+  k = k.replace(/transactions?/g, 'tx');
+  k = k.replace(/organizations?/g, 'org');
+  k = k.replace(/txes$/, 'tx').replace(/txs$/, 'tx');
+  k = k.replace(/matrices$/, 'matrix');
+  k = k.replace(/ies$/, 'y');
+  k = k.replace(/s$/, '');
+  return k;
+}
 
 // Helper to execute RavenDB requests (Supports GET and POST)
 function requestRaven(urlPath, method = 'GET', postData = null) {
@@ -245,60 +222,129 @@ app.get('/api/live/status', async (req, res) => {
   res.json(result);
 });
 
-// 2. Fetch Live List of All 42 Audited Domains with Real Live Counts
+// 2. Fetch Live Discovered Collections and Tables with Real Database Counts
 app.get('/api/live/domains', async (req, res) => {
   try {
-    // 1. Get RavenDB collection stats
+    // 1. Get Live RavenDB collections
     let ravenCounts = {};
+    let isRavenConnected = false;
     try {
       const stats = await requestRaven(`/databases/${ravenDb}/collections/stats`);
-      if (stats.Collections) {
+      if (stats && stats.Collections) {
+        isRavenConnected = true;
         Object.entries(stats.Collections).forEach(([col, count]) => {
-          ravenCounts[col] = count;
+          // Ignore RavenDB internal system collections (e.g. @hilo, @empty, Raven/*)
+          if (!col.startsWith('@') && !col.toLowerCase().startsWith('raven/')) {
+            ravenCounts[col] = count;
+          }
         });
       }
     } catch (e) {
       console.warn('Could not fetch collection stats from RavenDB:', e.message);
     }
 
-    // 2. Get PG table counts
-    const pgCounts = {};
+    // 2. Get Live PG table list and row counts dynamically from information_schema
+    const pgTables = [];
+    let isPgConnected = false;
     try {
       const pgRes = await pgPool.query(`
-        SELECT relname AS table_name, n_live_tup AS row_estimate
-        FROM pg_stat_user_tables;
+        SELECT 
+          t.table_name,
+          COALESCE(s.n_live_tup, 0)::int AS row_estimate
+        FROM information_schema.tables t
+        LEFT JOIN pg_stat_user_tables s ON s.relname = t.table_name
+        WHERE t.table_schema = 'public' 
+          AND t.table_type = 'BASE TABLE'
+        ORDER BY t.table_name ASC;
       `);
+      isPgConnected = true;
       pgRes.rows.forEach(r => {
-        pgCounts[r.table_name] = parseInt(r.row_estimate, 10);
+        pgTables.push({
+          table: r.table_name,
+          count: r.row_estimate,
+        });
       });
     } catch (e) {
       console.warn('Could not fetch PG table counts:', e.message);
     }
 
-    const domains = DOMAIN_MAP.map((item) => {
-      const ravenCount = ravenCounts[item.collection] ?? null;
-      const pgCount = pgCounts[item.table] ?? null;
-      return {
-        domain: item.domain,
-        collection: item.collection,
-        table: item.table,
-        idCol: item.idCol,
-        ravenCount: ravenCount !== null ? ravenCount : 'N/A',
-        pgCount: pgCount !== null ? pgCount : 'N/A',
-        status: 'PASS',
-      };
+    // 3. Dynamic pairing of tables and collections without ANY hardcoding
+    const domains = [];
+    const matchedRavenCollections = new Set();
+    const ravenKeys = Object.keys(ravenCounts);
+
+    // Build map of RavenDB match keys
+    const ravenKeyMap = new Map();
+    ravenKeys.forEach(col => {
+      ravenKeyMap.set(toMatchKey(col), col);
+      ravenKeyMap.set(toMatchKey(col).replace(/s$/, ''), col);
+      ravenKeyMap.set(toMatchKey(col).replace(/es$/, ''), col);
+    });
+
+    // Pair all live PostgreSQL tables
+    pgTables.forEach(pt => {
+      const pKey = toMatchKey(pt.table);
+      let matchedCol = ravenKeyMap.get(pKey) || 
+                       ravenKeyMap.get(pKey.replace(/s$/, '')) || 
+                       ravenKeyMap.get(pKey + 's') || 
+                       ravenKeyMap.get(pKey + 'es');
+
+      if (!matchedCol) {
+        for (const col of ravenKeys) {
+          const cKey = toMatchKey(col);
+          if (cKey.includes(pKey) || pKey.includes(cKey)) {
+            matchedCol = col;
+            break;
+          }
+        }
+      }
+
+      if (matchedCol) {
+        matchedRavenCollections.add(matchedCol);
+      }
+
+      const ravenCount = matchedCol ? (ravenCounts[matchedCol] ?? (isRavenConnected ? 0 : 'N/A')) : (isRavenConnected ? 0 : 'N/A');
+      const pgCount = pt.count;
+      const isMatch = isRavenConnected && isPgConnected && typeof ravenCount === 'number' && ravenCount === pgCount && pgCount > 0;
+
+      domains.push({
+        domain: formatDomainTitle(matchedCol || pt.table),
+        collection: matchedCol || formatDomainTitle(pt.table).replace(/\s+/g, ''),
+        table: pt.table,
+        idCol: 'id',
+        ravenCount,
+        pgCount,
+        status: isMatch ? 'PASS' : 'PENDING',
+      });
+    });
+
+    // Add any RavenDB collections that did not match a PG table
+    ravenKeys.forEach(col => {
+      if (!matchedRavenCollections.has(col)) {
+        const inferredTable = col.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '');
+        domains.push({
+          domain: formatDomainTitle(col),
+          collection: col,
+          table: inferredTable,
+          idCol: 'id',
+          ravenCount: ravenCounts[col],
+          pgCount: isPgConnected ? 0 : 'N/A',
+          status: 'PENDING',
+        });
+      }
     });
 
     res.json({ domains });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, domains: [] });
   }
 });
 
 // 3. Fetch Live Documents from RavenDB Cloud (Uses correct POST /queries endpoint)
 app.get('/api/live/raven/:collection', async (req, res) => {
   const { collection } = req.params;
-  const limit = Math.min(parseInt(req.query.limit || '25', 10), 100);
+  const isAll = req.query.limit === 'all' || !req.query.limit;
+  const limit = isAll ? 50000 : parseInt(req.query.limit, 10);
   const skip = parseInt(req.query.skip || '0', 10);
 
   try {
@@ -331,7 +377,14 @@ app.get('/api/live/raven/:collection', async (req, res) => {
 // 4. Fetch Live Rows from PostgreSQL Table
 app.get('/api/live/postgres/:table', async (req, res) => {
   const { table } = req.params;
-  const limit = Math.min(parseInt(req.query.limit || '25', 10), 100);
+  const isAll = req.query.limit === 'all' || !req.query.limit;
+  let limitClause = '';
+  const queryParams = [];
+
+  if (!isAll && req.query.limit) {
+    queryParams.push(parseInt(req.query.limit, 10));
+    limitClause = `LIMIT $1`;
+  }
 
   const safeTable = table.replace(/[^a-zA-Z0-9_]/g, '');
   try {
@@ -350,7 +403,7 @@ app.get('/api/live/postgres/:table', async (req, res) => {
     }
 
     const [queryRes, colRes, countRes, trgRes] = await Promise.all([
-      pgPool.query(`SELECT * FROM ${safeTable} ${orderClause} LIMIT $1;`, [limit]),
+      pgPool.query(`SELECT * FROM ${safeTable} ${orderClause} ${limitClause};`, queryParams),
       pgPool.query(
         `SELECT column_name, data_type, udt_name, is_nullable, column_default 
          FROM information_schema.columns 
@@ -435,6 +488,13 @@ app.get('/api/live/summary-view', async (req, res) => {
       error: `Failed to query student_fee_summary_view: ${err.message}`,
     });
   }
+});
+
+process.on('uncaughtException', (err) => {
+  console.warn('[Server Warning] Uncaught exception:', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.warn('[Server Warning] Unhandled rejection:', reason);
 });
 
 app.listen(PORT, () => {

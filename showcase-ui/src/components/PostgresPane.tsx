@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import type { CollectionSummary } from '../types/migration';
 import {
   Database,
@@ -107,10 +107,10 @@ export const PostgresPane: React.FC<PostgresPaneProps> = ({ collection, docIndex
   };
 
   // Merge activeRow.data and activeRow.jsonbColumns so ALL columns exist
-  const allColumns: Record<string, any> = {
+  const allColumns: Record<string, any> = useMemo(() => ({
     ...(activeRow?.data || {}),
     ...(activeRow?.jsonbColumns || {})
-  };
+  }), [activeRow]);
 
   const isColumnJsonb = (key: string, val: any): boolean => {
     if (activeRow?.columnTypes?.[key] === 'jsonb') return true;
@@ -141,35 +141,44 @@ export const PostgresPane: React.FC<PostgresPaneProps> = ({ collection, docIndex
   };
 
   // Collect all JSONB columns for the dedicated JSONB tab
-  const allJsonbColumns: Record<string, any> = {
-    ...(activeRow?.jsonbColumns || {})
-  };
+  const { allJsonbColumns, jsonbKeyCount, totalColumnCount, scalarKeyCount } = useMemo(() => {
+    const jsonbCols: Record<string, any> = {
+      ...(activeRow?.jsonbColumns || {})
+    };
 
-  Object.entries(allColumns).forEach(([k, v]) => {
-    if (isColumnJsonb(k, v) && allJsonbColumns[k] === undefined) {
-      allJsonbColumns[k] = getParsedJsonValue(v);
-    }
-  });
+    Object.entries(allColumns).forEach(([k, v]) => {
+      if (isColumnJsonb(k, v) && jsonbCols[k] === undefined) {
+        jsonbCols[k] = getParsedJsonValue(v);
+      }
+    });
 
-  const jsonbKeyCount = Object.keys(allJsonbColumns).length;
-  const totalColumnCount = Object.keys(allColumns).length;
-  const scalarKeyCount = Math.max(0, totalColumnCount - jsonbKeyCount);
+    const jCount = Object.keys(jsonbCols).length;
+    const tCount = Object.keys(allColumns).length;
+    return {
+      allJsonbColumns: jsonbCols,
+      jsonbKeyCount: jCount,
+      totalColumnCount: tCount,
+      scalarKeyCount: Math.max(0, tCount - jCount),
+    };
+  }, [allColumns, activeRow]);
 
   // Filter columns according to selected pill & search box
-  const filteredColumns = Object.entries(allColumns).filter(([key, val]) => {
-    const isJson = isColumnJsonb(key, val);
+  const filteredColumns = useMemo(() => {
+    return Object.entries(allColumns).filter(([key, val]) => {
+      const isJson = isColumnJsonb(key, val);
 
-    if (columnFilter === 'jsonb' && !isJson) return false;
-    if (columnFilter === 'scalar' && isJson) return false;
+      if (columnFilter === 'jsonb' && !isJson) return false;
+      if (columnFilter === 'scalar' && isJson) return false;
 
-    if (columnSearch.trim()) {
-      const q = columnSearch.toLowerCase();
-      const valStr = typeof val === 'object' ? JSON.stringify(val).toLowerCase() : String(val).toLowerCase();
-      return key.toLowerCase().includes(q) || valStr.includes(q);
-    }
+      if (columnSearch.trim()) {
+        const q = columnSearch.toLowerCase();
+        const valStr = typeof val === 'object' ? JSON.stringify(val).toLowerCase() : String(val).toLowerCase();
+        return key.toLowerCase().includes(q) || valStr.includes(q);
+      }
 
-    return true;
-  });
+      return true;
+    });
+  }, [allColumns, columnFilter, columnSearch]);
 
   return (
     <div className="pane postgres-pane">
@@ -180,7 +189,7 @@ export const PostgresPane: React.FC<PostgresPaneProps> = ({ collection, docIndex
           </div>
           <div>
             <div className="pane-title">
-              PostgreSQL 16 <span className="pane-sub-type">(Target • Relational + JSONB)</span>
+              PostgreSQL <span className="pane-sub-type">(Target • Relational + JSONB)</span>
             </div>
             <div className="pane-collection-name">
               Table / View: <span className="highlight-tag pg">{collection.postgresTable}</span>
@@ -239,8 +248,34 @@ export const PostgresPane: React.FC<PostgresPaneProps> = ({ collection, docIndex
       </div>
 
       <div className="pane-content-body">
-        {activeTab === 'row' && (
-          <div className="relational-grid-container">
+        {!activeRow ? (
+          <div className="empty-disconnected-state">
+            <div className="empty-icon-circle pg-empty">
+              <Database size={32} />
+            </div>
+            <h3>PostgreSQL is Not Connected or Table is Empty</h3>
+            <p>
+              No records found in table <strong>"{collection.postgresTable}"</strong>.
+            </p>
+            <div className="connection-checklist">
+              <div className="check-item">
+                <span className="step-num">1</span>
+                <span>Ensure PostgreSQL is running: <code>docker compose up -d rpg-postgres</code>.</span>
+              </div>
+              <div className="check-item">
+                <span className="step-num">2</span>
+                <span>Run data migration to populate PostgreSQL: <code>docker compose run --rm rpg-migrator --all</code>.</span>
+              </div>
+              <div className="check-item">
+                <span className="step-num">3</span>
+                <span>Start the live backend bridge server: <code>npm run server</code>.</span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+            {activeTab === 'row' && (
+              <div className="relational-grid-container">
             {/* Column Filter Toolbar */}
             <div className="pg-table-filter-bar">
               <div className="pg-filter-pills">
@@ -499,7 +534,7 @@ export const PostgresPane: React.FC<PostgresPaneProps> = ({ collection, docIndex
               <div className="query-code">{activeRow?.sqlQuery || `SELECT * FROM ${collection.postgresTable} LIMIT 10;`}</div>
             </div>
             <div className="query-notes">
-              Executed with parameterized UUID lookups and native LATERAL projections in PostgreSQL 16.
+              Executed with parameterized UUID lookups and native LATERAL projections in PostgreSQL.
             </div>
           </div>
         )}
@@ -537,7 +572,9 @@ export const PostgresPane: React.FC<PostgresPaneProps> = ({ collection, docIndex
             </div>
           </div>
         )}
-      </div>
+      </>
+    )}
+  </div>
     </div>
   );
 };

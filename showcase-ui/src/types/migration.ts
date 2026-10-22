@@ -1,16 +1,4 @@
-export type DomainStatus = 'PASS' | 'FAIL' | 'AUDITING';
-
-export interface FieldMapping {
-  ravenField: string;
-  postgresColumn: string;
-  sourceType: string;
-  targetType: string;
-  transformRule: 'direct' | 'case_conversion' | 'uuid_parse' | 'datetime_utc' | 'jsonb_lateral' | 'jsonb_array';
-  sourceValue: any;
-  targetValue: any;
-  isMatched: boolean;
-  notes?: string;
-}
+export type DomainStatus = 'PASS' | 'FAIL' | 'AUDITING' | 'PENDING';
 
 export interface DocumentMetadata {
   id: string;
@@ -50,7 +38,6 @@ export interface CollectionSummary {
   primaryKey: string;
   sampleDocuments: RavenDocument[];
   sampleRows: PostgresRow[];
-  fieldMappings: FieldMapping[];
   ddl: string;
   triggers?: string;
   indexes?: string[];
@@ -63,7 +50,7 @@ export interface ChatMessage {
   content: string;
   timestamp: string;
   codeSnippet?: {
-    language: 'sql' | 'rql' | 'json' | 'csharp' | 'diff';
+    language: 'sql' | 'rql' | 'json' | 'csharp';
     code: string;
     title?: string;
   };

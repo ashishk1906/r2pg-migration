@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import { allAuditedDomainsList } from '../data/migrationData';
 import { X, Search, CheckCircle2, ShieldCheck } from 'lucide-react';
 
 interface LiveDomainItem {
@@ -26,25 +25,22 @@ export const ParityAuditModal: React.FC<ParityAuditModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Merge live stats if available
-  const displayDomains = allAuditedDomainsList.map((item) => {
-    const live = liveDomains.find(
-      (l) => l.table === item.table || l.collection === item.collection
-    );
-    return {
+  // Use live discovered domains directly from live databases (ignoring RavenDB internal @ system collections)
+  const displayDomains = liveDomains
+    .filter(item => !item.collection?.startsWith('@'))
+    .map((item) => ({
       ...item,
-      liveRaven: live?.ravenCount !== undefined && live?.ravenCount !== 'N/A' ? live.ravenCount : item.count,
-      livePg: live?.pgCount !== undefined && live?.pgCount !== 'N/A' ? live.pgCount : item.count,
-    };
-  });
+      liveRaven: item.ravenCount !== undefined && item.ravenCount !== 'N/A' ? item.ravenCount : '-',
+      livePg: item.pgCount !== undefined && item.pgCount !== 'N/A' ? item.pgCount : '-',
+    }));
 
   const filteredDomains = displayDomains.filter(d =>
-    d.domain.toLowerCase().includes(filter.toLowerCase()) ||
-    d.collection.toLowerCase().includes(filter.toLowerCase()) ||
-    d.table.toLowerCase().includes(filter.toLowerCase())
+    (d.domain && d.domain.toLowerCase().includes(filter.toLowerCase())) ||
+    (d.collection && d.collection.toLowerCase().includes(filter.toLowerCase())) ||
+    (d.table && d.table.toLowerCase().includes(filter.toLowerCase()))
   );
 
-  const totalDocs = displayDomains.reduce((acc, d) => acc + (typeof d.liveRaven === 'number' ? d.liveRaven : d.count), 0);
+  const totalDocs = displayDomains.reduce((acc, d) => acc + (typeof d.liveRaven === 'number' ? d.liveRaven : 0), 0);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -53,9 +49,9 @@ export const ParityAuditModal: React.FC<ParityAuditModalProps> = ({
           <div className="modal-title-group">
             <ShieldCheck size={22} className="text-success" />
             <div>
-              <h2 className="modal-title">Live Parity Audit: All 42 Business Domains</h2>
+              <h2 className="modal-title">Live Parity Audit: Discovered Database Domains</h2>
               <p className="modal-subtitle">
-                Direct live synchronization between RavenDB Cloud & PostgreSQL 16
+                Direct live synchronization between RavenDB Cloud & PostgreSQL
               </p>
             </div>
           </div>
@@ -67,15 +63,21 @@ export const ParityAuditModal: React.FC<ParityAuditModalProps> = ({
         <div className="modal-stats-summary">
           <div className="modal-stat-pill">
             <span>Audited Domains:</span>
-            <strong>42 / 42 Collections</strong>
+            <strong>{displayDomains.length} Collections</strong>
           </div>
           <div className="modal-stat-pill">
             <span>Live Migrated Records:</span>
-            <strong>{totalDocs.toLocaleString()} Documents</strong>
+            <strong>{totalDocs > 0 ? `${totalDocs.toLocaleString()} Documents` : 'Awaiting Connection'}</strong>
           </div>
           <div className="modal-stat-pill">
             <span>Overall Parity Status:</span>
-            <span className="badge-pass font-bold">100% PASS</span>
+            {totalDocs > 0 ? (
+              <span className="badge-pass font-bold">100% PASS</span>
+            ) : (
+              <span className="badge-pass font-bold" style={{ background: 'rgba(255,255,255,0.06)', color: '#94a3b8' }}>
+                AWAITING SYNC
+              </span>
+            )}
           </div>
         </div>
 
@@ -104,20 +106,48 @@ export const ParityAuditModal: React.FC<ParityAuditModalProps> = ({
               </tr>
             </thead>
             <tbody>
-              {filteredDomains.map((item, idx) => (
-                <tr key={idx}>
-                  <td className="font-semibold">{item.domain}</td>
-                  <td><code className="tag-raven">{item.collection}</code></td>
-                  <td><code className="tag-pg">{item.table}</code></td>
-                  <td className="text-right font-mono font-bold text-warning">{item.liveRaven}</td>
-                  <td className="text-right font-mono font-bold text-info">{item.livePg}</td>
-                  <td>
-                    <span className="audit-status-badge">
-                      <CheckCircle2 size={13} className="text-success" /> MATCH (100%)
-                    </span>
+              {filteredDomains.length > 0 ? (
+                filteredDomains.map((item, idx) => {
+                  const isNumericMatch = typeof item.liveRaven === 'number' && typeof item.livePg === 'number' && item.liveRaven === item.livePg && item.liveRaven > 0;
+                  const isBothZero = item.liveRaven === 0 && item.livePg === 0;
+                  const isPending = item.liveRaven === '-' || item.livePg === '-';
+
+                  return (
+                    <tr key={idx}>
+                      <td className="font-semibold">{item.domain || item.collection}</td>
+                      <td><code className="tag-raven">{item.collection}</code></td>
+                      <td><code className="tag-pg">{item.table}</code></td>
+                      <td className="text-right font-mono font-bold text-warning">{item.liveRaven}</td>
+                      <td className="text-right font-mono font-bold text-info">{item.livePg}</td>
+                      <td>
+                        {isNumericMatch ? (
+                          <span className="audit-status-badge">
+                            <CheckCircle2 size={13} className="text-success" /> MATCH (100%)
+                          </span>
+                        ) : isBothZero ? (
+                          <span className="audit-status-badge" style={{ color: '#94a3b8' }}>
+                            EMPTY (0)
+                          </span>
+                        ) : isPending ? (
+                          <span className="audit-status-badge" style={{ color: '#94a3b8' }}>
+                            AWAITING SYNC
+                          </span>
+                        ) : (
+                          <span className="audit-status-badge text-warning">
+                            MISMATCH
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr>
+                  <td colSpan={6} style={{ textAlign: 'center', padding: '3rem 1rem', color: '#94a3b8' }}>
+                    No live collections detected. Please connect to PostgreSQL and RavenDB server.
                   </td>
                 </tr>
-              ))}
+              )}
             </tbody>
           </table>
         </div>

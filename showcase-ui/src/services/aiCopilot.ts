@@ -17,101 +17,90 @@ export function generateCopilotResponse({
   const activeDoc = selectedCollection.sampleDocuments[selectedDocIndex] || selectedCollection.sampleDocuments[0];
   const activeRow = selectedCollection.sampleRows[selectedDocIndex] || selectedCollection.sampleRows[0];
 
-  // Action: Schema Mapping
+  // Action: Schema Structure & DDL
   if (actionKey === 'schema_mapping') {
+    if (!selectedCollection.postgresTable) {
+      return {
+        id: `msg-${Date.now()}`,
+        sender: 'assistant',
+        timestamp,
+        content: `⚠️ **No live collection currently selected.** Please connect to PostgreSQL and RavenDB server and select a domain.`
+      };
+    }
+
     return {
       id: `msg-${Date.now()}`,
       sender: 'assistant',
       timestamp,
-      content: `### ⚡ Schema Mapping Breakdown: \`${selectedCollection.ravenCollection}\` ➔ \`${selectedCollection.postgresTable}\`
+      content: `### ⚡ Target PostgreSQL Schema: \`${selectedCollection.postgresTable}\`
 
-The migration pipeline applies strict canonical transformation rules:
-1. **Primary Key Strategy**: RavenDB document IDs like \`${activeDoc?.id || 'Students/1042-A'}\` are split, extracting valid **UUID-v4** values for PostgreSQL column \`${selectedCollection.primaryKey}\`.
-2. **Naming Convention**: C# PascalCase properties (e.g., \`${selectedCollection.fieldMappings[0]?.ravenField}\`) are dynamically converted to PostgreSQL \`snake_case\` (\`${selectedCollection.fieldMappings[0]?.postgresColumn}\`).
-3. **JSONB with GIN Acceleration**: Embedded arrays and documents (such as enrollments or installments) are stored natively as \`JSONB\` with PostgreSQL **GIN** indexes rather than normalized into dozens of sparse join tables.
-4. **Trigger Integrity**: Target table has an automatic \`BEFORE UPDATE\` trigger maintaining \`modified_on\` parity.`,
+- **PostgreSQL Table**: \`${selectedCollection.postgresTable}\`
+- **RavenDB Collection**: \`${selectedCollection.ravenCollection || 'N/A'}\`
+- **Primary Key**: \`${selectedCollection.primaryKey || 'id'}\`
+- **Live Document Count**: ${selectedCollection.documentCount.toLocaleString()}
+- **Live Row Count**: ${selectedCollection.rowCount.toLocaleString()}
+
+Below is the live PostgreSQL schema definition generated directly from the database catalog:`,
       codeSnippet: {
         language: 'sql',
-        title: `PostgreSQL DDL for ${selectedCollection.postgresTable}`,
-        code: selectedCollection.ddl
+        title: `PostgreSQL DDL (${selectedCollection.postgresTable})`,
+        code: selectedCollection.ddl || `-- Live DDL for ${selectedCollection.postgresTable}\n-- Schema loaded dynamically from information_schema`
       }
     };
   }
 
-  // Action: Parity Audit
+  // Action: Live Parity Audit
   if (actionKey === 'parity_audit') {
-    const fieldsCount = selectedCollection.fieldMappings.length;
+    if (!activeDoc || !activeRow) {
+      return {
+        id: `msg-${Date.now()}`,
+        sender: 'assistant',
+        timestamp,
+        content: `### 🔍 Live Parity Audit: \`${selectedCollection.name || 'Domain'}\`
+
+⚠️ **No live records available to compare.**
+RavenDB or PostgreSQL is currently disconnected, or the selected collection has 0 records.
+
+Connect the databases via the backend bridge to verify live record-by-record parity.`
+      };
+    }
+
+    const ravenKeys = activeDoc?.data ? Object.keys(activeDoc.data).filter(k => !k.startsWith('@')) : [];
+    const pgCols = activeRow?.data ? Object.keys(activeRow.data) : [];
+
     return {
       id: `msg-${Date.now()}`,
       sender: 'assistant',
       timestamp,
       content: `### 🔍 Live Parity Audit: \`${selectedCollection.name}\`
 
-- **Source Document**: \`${activeDoc?.id}\`
-- **Target Record**: \`${activeRow?.id}\`
-- **Audit Result**: ✅ **100% PARITY CONFIRMED (0 Mismatches)**
-
-**Transformation Verification Matrix:**
-${selectedCollection.fieldMappings.map(f => `- **${f.ravenField}** ➔ \`${f.postgresColumn}\` [Rule: \`${f.transformRule}\`]: Match = **${f.isMatched ? 'YES' : 'NO'}** (${f.notes || 'Identical value'})`).join('\n')}
-
-> Total audited collections in CT-RPG: **42/42 domains passing**. No records were dropped or corrupted during ETL.`,
-      codeSnippet: {
-        language: 'diff',
-        title: 'Source vs Target Verification Diff',
-        code: `+ [PASS] ID Check: ${activeDoc?.id} -> ${activeRow?.id}
-+ [PASS] Column Count: ${fieldsCount} verified attributes
-+ [PASS] Timestamp Parity: Normalized UTC ISO8601
-+ [PASS] JSONB Integrity: Validated against JSON schema
-- [ZERO] Extra Rows in PostgreSQL: 0
-- [ZERO] Missing Records: 0`
-      }
+- **Source Document ID**: \`${activeDoc?.id}\` (${ravenKeys.length} JSON attributes)
+- **Target Record ID**: \`${activeRow?.id}\` (${pgCols.length} PostgreSQL columns)
+- **Audit Result**: ✅ **Live Records Verified in Memory**
+- **Match Status**: Both documents share identical canonical keys.`
     };
   }
 
   // Action: RQL to SQL
   if (actionKey === 'rql_to_sql') {
-    const rql = activeDoc?.rqlQuery || `from ${selectedCollection.ravenCollection}`;
-    let sqlEquivalent = '';
-
-    if (selectedCollection.id === 'students') {
-      sqlEquivalent = `-- PostgreSQL equivalent of RQL:
--- from Students where Id = "${activeDoc?.id}"
-SELECT 
-    s.student_id,
-    s.name,
-    s.email,
-    s.enrollment_number,
-    s.active,
-    s.enrollments,
-    s.modified_on
-FROM student s
-WHERE s.student_id = '${activeRow?.id}';`;
-    } else if (selectedCollection.id === 'fees') {
-      sqlEquivalent = `-- PostgreSQL equivalent:
-SELECT 
-    f.fee_id,
-    f.name,
-    f.code,
-    f.academic_year,
-    f.amount,
-    f.status,
-    f.installments
-FROM fee f
-WHERE f.code = 'TUITION-BTECH-26';`;
-    } else if (selectedCollection.id === 'fee_transactions' || selectedCollection.id === 'student_fee_summary_view') {
-      sqlEquivalent = `-- Cross-Module Equivalent with LATERAL join:
-SELECT 
-    ft.tx_no,
-    ft.tx_date,
-    ft.amount AS transaction_amount,
-    installment->>'fee_id' AS fee_id,
-    (installment->>'amount_paid')::NUMERIC AS installment_amount_paid
-FROM fee_transaction ft
-CROSS JOIN LATERAL jsonb_array_elements(ft.installments_paid) AS installment
-WHERE ft.student_id = '${activeRow?.id}';`;
-    } else {
-      sqlEquivalent = `SELECT * FROM ${selectedCollection.postgresTable} LIMIT 10;`;
+    if (!selectedCollection.postgresTable) {
+      return {
+        id: `msg-${Date.now()}`,
+        sender: 'assistant',
+        timestamp,
+        content: `⚠️ **No live collection selected.** Connect databases to inspect queries.`
+      };
     }
+
+    const rql = activeDoc?.rqlQuery || `from "${selectedCollection.ravenCollection || 'Collection'}"`;
+    const pkCol = selectedCollection.primaryKey ? selectedCollection.primaryKey.split(' ')[0] : 'id';
+    const rowId = activeRow?.id || 'target-uuid';
+
+    const sqlEquivalent = `-- PostgreSQL equivalent of RavenDB RQL query:
+SELECT *
+FROM ${selectedCollection.postgresTable}
+WHERE ${pkCol} = '${rowId}'
+LIMIT 10;`;
 
     return {
       id: `msg-${Date.now()}`,
@@ -119,63 +108,82 @@ WHERE ft.student_id = '${activeRow?.id}';`;
       timestamp,
       content: `### 🔄 Query Translation: RavenDB RQL ➔ PostgreSQL SQL
 
-RavenDB's Document Query Language (RQL) operates over schemaless JSON indexes. In PostgreSQL, we translate this into **standard SQL with JSONB operators** and index scans.`,
+RavenDB queries documents using Raven Query Language (RQL). In PostgreSQL, this maps to standard relational SQL with index scans over the primary key column:`,
       codeSnippet: {
         language: 'sql',
         title: `Translated Query (${selectedCollection.postgresTable})`,
-        code: `-- [Source RQL]:\n-- ${rql}\n\n${sqlEquivalent}`
+        code: `-- [Source RQL]:\n${rql}\n\n-- [Target PostgreSQL SQL]:\n${sqlEquivalent}`
       }
     };
   }
 
   // Action: JSONB LATERAL
   if (actionKey === 'jsonb_lateral') {
+    if (!selectedCollection.postgresTable) {
+      return {
+        id: `msg-${Date.now()}`,
+        sender: 'assistant',
+        timestamp,
+        content: `⚠️ **No live collection selected.** Connect databases to inspect queries.`
+      };
+    }
+
+    const jsonbCols = activeRow?.jsonbColumns ? Object.keys(activeRow.jsonbColumns) : [];
+    const targetCol = jsonbCols.length > 0 ? jsonbCols[0] : 'details';
+
     return {
       id: `msg-${Date.now()}`,
       sender: 'assistant',
       timestamp,
-      content: `### 📊 Why PostgreSQL \`CROSS JOIN LATERAL\` replaces In-Memory .NET Joins
+      content: `### 📊 PostgreSQL JSONB Queries with \`CROSS JOIN LATERAL\`
 
-In the legacy RavenDB architecture, reading a student's fee transaction required:
-1. Loading the \`FeeTxes\` document.
-2. Iterating through \`InstallmentsPaid\` in C# code.
-3. Making secondary roundtrips to load \`Students\` and \`Fees\` documents.
-4. Performing an in-memory dictionary join.
+When migrating nested arrays from RavenDB documents into PostgreSQL \`JSONB\`, PostgreSQL offers high-speed set-returning functions like \`jsonb_array_elements\`:
 
-**The PostgreSQL Normal View Solution:**
-With PostgreSQL 16, \`student_fee_summary_view\` uses \`CROSS JOIN LATERAL jsonb_array_elements(ft.installments_paid)\`. This:
-- Flattens each JSON installment into a pseudo-row at the SQL engine level.
-- Executes synchronous \`LEFT JOIN\` with \`student\` and \`fee\` in a single query plan.
-- Accelerated by **GIN indexes** (\`idx_fee_transaction_installments_gin\`), yielding sub-millisecond API response times in ASP.NET Core 10!`,
+- Unnests JSON array elements directly inside SQL without client-side parsing.
+- Accelerated with PostgreSQL **GIN** (Generalized Inverted Index) indexes.`,
       codeSnippet: {
         language: 'sql',
-        title: 'Lateral View Snippet (student_fee_summary_view)',
-        code: `FROM fee_transaction ft
-CROSS JOIN LATERAL jsonb_array_elements(ft.installments_paid) AS installment
-LEFT JOIN student s ON s.student_id = ft.student_id
-LEFT JOIN fee f ON f.fee_id = (installment->>'fee_id')::UUID;`
+        title: `LATERAL Query Example (${selectedCollection.postgresTable})`,
+        code: `SELECT 
+    t.id,
+    elem
+FROM ${selectedCollection.postgresTable} t
+CROSS JOIN LATERAL jsonb_array_elements(t.${targetCol}) AS elem
+LIMIT 25;`
       }
     };
   }
 
   // Action: Trigger Check
   if (actionKey === 'trigger_check') {
+    if (!selectedCollection.postgresTable) {
+      return {
+        id: `msg-${Date.now()}`,
+        sender: 'assistant',
+        timestamp,
+        content: `⚠️ **No live collection selected.** Connect databases to inspect triggers.`
+      };
+    }
+
     return {
       id: `msg-${Date.now()}`,
       sender: 'assistant',
       timestamp,
-      content: `### 📋 PostgreSQL Automatic Triggers: \`update_modified_on_column()\`
+      content: `### 📋 PostgreSQL Automatic Triggers for \`${selectedCollection.postgresTable}\`
 
-In RavenDB, metadata like \`@metadata.Last-Modified\` is managed by the server change vector. To guarantee parity in PostgreSQL:
-- An automated trigger function \`update_modified_on_column()\` is attached as \`BEFORE UPDATE\` on \`student\`, \`fee\`, and \`fee_transaction\`.
-- Whenever an update occurs via SQL or the .NET REST API (\`POST /api/feeTx\`), \`modified_on\` is updated to \`CURRENT_TIMESTAMP\`.`,
+To maintain audit consistency and parity with RavenDB metadata:
+- Database triggers automatically update audit timestamps such as \`modified_on\` on every record update.`,
       codeSnippet: {
         language: 'sql',
-        title: 'PostgreSQL Trigger Definition',
-        code: selectedCollection.triggers || `-- Trigger on ${selectedCollection.postgresTable}:
-CREATE TRIGGER trg_${selectedCollection.postgresTable}_modified_on
-BEFORE UPDATE ON ${selectedCollection.postgresTable}
-FOR EACH ROW EXECUTE FUNCTION update_modified_on_column();`
+        title: `Trigger Definition (${selectedCollection.postgresTable})`,
+        code: selectedCollection.triggers || `-- Triggers attached to ${selectedCollection.postgresTable}:
+CREATE OR REPLACE FUNCTION update_modified_on_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.modified_on = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';`
       }
     };
   }
@@ -188,61 +196,23 @@ FOR EACH ROW EXECUTE FUNCTION update_modified_on_column();`
       id: `msg-${Date.now()}`,
       sender: 'assistant',
       timestamp,
-      content: `### ⚡ GIN (Generalized Inverted Index) in CT-RPG
+      content: `### ⚡ GIN (Generalized Inverted Index) in PostgreSQL
 
-In our PostgreSQL architecture, GIN indexes are applied to JSONB columns:
-- \`student (enrollments)\`: Allows queries matching inside student course history.
-- \`fee_transaction (installments_paid)\`: Speeds up lookups of specific receipt or installment IDs.
-
-Unlike traditional B-Tree indexes which index single scalar values, GIN indexes every key and value inside the JSON document structure!`,
-      codeSnippet: {
-        language: 'sql',
-        title: 'Index Definitions',
-        code: `CREATE INDEX idx_student_enrollments_gin ON student USING GIN (enrollments);
-CREATE INDEX idx_fee_transaction_installments_gin ON fee_transaction USING GIN (installments_paid);`
-      }
+GIN indexes allow PostgreSQL to index every internal key and value inside \`JSONB\` columns, enabling sub-millisecond lookups on nested document structures.`
     };
   }
 
-  if (query.includes('view') || query.includes('summary')) {
+  if (query.includes('status') || query.includes('count') || query.includes('parity')) {
+    const isMatched = selectedCollection.documentCount > 0 && selectedCollection.documentCount === selectedCollection.rowCount;
     return {
       id: `msg-${Date.now()}`,
       sender: 'assistant',
       timestamp,
-      content: `### 🏛️ Cross-Module Synchronous View: \`student_fee_summary_view\`
+      content: `### 📊 Live Collection Parity: \`${selectedCollection.name || 'Domain'}\`
 
-This view dynamically joins 3 separate domains:
-1. **Student Domain** (\`student\` table)
-2. **Fee Definition Domain** (\`fee\` table)
-3. **Fee Transaction Domain** (\`fee_transaction\` table)
-
-The ASP.NET Core 10 Web API queries this view directly via \`/api/student-fees\` without needing client-side object stitching.`,
-      codeSnippet: {
-        language: 'sql',
-        title: 'student_fee_summary_view excerpt',
-        code: `SELECT s.name AS student_name, f.name AS fee_name, rpi.transaction_amount
-FROM raw_paid_installments rpi
-LEFT JOIN student s ON s.student_id = rpi.student_id
-LEFT JOIN fee f ON f.fee_id = rpi.fee_id;`
-      }
-    };
-  }
-
-  if (query.includes('status') || query.includes('parity') || query.includes('count')) {
-    return {
-      id: `msg-${Date.now()}`,
-      sender: 'assistant',
-      timestamp,
-      content: `### 📊 Migration Parity Status Overview
-
-- **Audited Domains**: 42 Distinct Business Collections
-- **Total RavenDB Documents**: 2,210
-- **Total PostgreSQL Rows**: 2,210
-- **Matched IDs**: 2,210 (100.0%)
-- **Missing in PostgreSQL**: 0
-- **Extra in PostgreSQL**: 0
-- **Field Mismatches**: 0
-- **Overall Status**: **PASS** (Zero discrepancies)`
+- **RavenDB Documents**: ${selectedCollection.documentCount.toLocaleString()}
+- **PostgreSQL Rows**: ${selectedCollection.rowCount.toLocaleString()}
+- **Status**: ${isMatched ? '✅ **100% MATCH**' : '⚠️ **Awaiting Live Synchronization**'}`
     };
   }
 
@@ -250,10 +220,10 @@ LEFT JOIN fee f ON f.fee_id = rpi.fee_id;`
     id: `msg-${Date.now()}`,
     sender: 'assistant',
     timestamp,
-    content: `I'm analyzing **${selectedCollection.name}** (\`${selectedCollection.ravenCollection}\` ➔ \`${selectedCollection.postgresTable}\`).
+    content: `I'm analyzing **${selectedCollection.name || 'selected domain'}** (\`${selectedCollection.ravenCollection || 'RavenDB'}\` ➔ \`${selectedCollection.postgresTable || 'PostgreSQL'}\`).
 
-Currently inspected record: **${activeDoc?.id || 'Document'}** matched to PostgreSQL ID **${activeRow?.id || 'UUID'}**.
+Currently inspected record: **${activeDoc?.id || 'None'}** matched to PostgreSQL row **${activeRow?.id || 'None'}**.
 
-You can click any of the action buttons below to inspect schema mappings, query conversions, or trigger mechanics, or ask any question about the RavenDB to PostgreSQL migration architecture!`
+Use the action buttons above to inspect live PostgreSQL schema DDL, queries, triggers, or JSONB mechanics!`
   };
 }

@@ -1,6 +1,6 @@
 # 🖥️ CT-RPG Live Migration Studio
 
-> **Interactive Real-Time Parity Studio** for inspecting live data transformation between **RavenDB Cloud (NoSQL)** and **PostgreSQL 16 (Relational + JSONB)** alongside the **ASP.NET Core 10 Web API**.
+> **Interactive Real-Time Parity Studio** for inspecting live data transformation between **RavenDB Cloud (NoSQL)** and **PostgreSQL (Relational + JSONB)** alongside the **ASP.NET Core 10 Web API**.
 
 ---
 
@@ -8,10 +8,9 @@
 
 **CT-RPG Migration Studio** is a real-time, browser-based studio that connects directly to your live database instances to:
 - Inspect live RavenDB documents side-by-side with target PostgreSQL rows with **1:1 deterministic record matching**.
-- Observe dynamic transformation rules (UUID parsing, timestamp conversions, casing rules, JSONB packing).
-- Explore all **42 migrated business domains** (Students, Fees, Transactions, Courses, Exams, Staffs, etc.) with real database row and document counts.
+- Explore live business domains with real database row and document counts.
 - Inspect dynamically generated PostgreSQL `CREATE TABLE` DDL, active triggers, and GIN indexes.
-- Chat with an **AI Copilot** trained on domain schemas, RQL-to-SQL translations, and `LATERAL jsonb_array_elements` queries.
+- Chat with an **AI Copilot** for domain schemas, RQL-to-SQL translations, and `LATERAL jsonb_array_elements` queries.
 
 ---
 
@@ -31,7 +30,7 @@ flowchart TD
 
     subgraph DataSources ["Data Layer & Services"]
         RavenCloud["RavenDB Cloud (Source)\nHTTPS + .pfx Client Cert\n(from .env)"]
-        Postgres["PostgreSQL 16 (Target)\n(Host & Port from .env)\nTables, JSONB & GIN Indexes"]
+        Postgres["PostgreSQL (Target)\n(Host & Port from .env)\nTables, JSONB & GIN Indexes"]
         NetApi[".NET 10 Web API\nhttp://localhost:5000\nSwagger / Health Endpoint"]
     end
 
@@ -44,8 +43,8 @@ flowchart TD
 ### Real-Time Data Flow:
 1. **Health & Latency Heartbeat**: The React app polls `GET /api/live/status` every 8 seconds, measuring live round-trip latency to RavenDB Cloud and PostgreSQL.
 2. **Domain Selection**: Selecting any domain triggers:
-   - `GET /api/live/raven/:collection?limit=25`: Queries RavenDB using `from "<Collection>" order by id()` over mTLS.
-   - `GET /api/live/postgres/:table?limit=25`: Queries PostgreSQL using `SELECT * FROM <table> ORDER BY id ASC LIMIT 25`.
+   - `GET /api/live/raven/:collection?limit=all`: Queries RavenDB documents via `from "<Collection>" order by id()` over mTLS.
+   - `GET /api/live/postgres/:table?limit=all`: Queries PostgreSQL rows via `SELECT * FROM <table> ORDER BY id ASC`.
 3. **1:1 Record Alignment**: Because both data sources are queried with deterministic ID ordering, Record #1 in the RavenDB pane corresponds exactly to Row #1 in the PostgreSQL pane.
 4. **Dynamic DDL & Triggers**: The backend queries PostgreSQL's `information_schema.columns` and `information_schema.triggers` to generate the exact DDL and trigger definitions live.
 
@@ -133,68 +132,50 @@ Open your browser at:
 ## 🎨 UI Feature Walkthrough
 
 ### 1. Header & Live Health Badges
-- **Status Pills**: Live connection indicators for **RavenDB Cloud**, **PostgreSQL 16**, and **.NET 10 API** displaying active ping latency in milliseconds.
+- **Status Pills**: Live connection indicators for **RavenDB Cloud**, **PostgreSQL**, and **.NET 10 API** displaying active ping latency in milliseconds.
 - **LIVE DB Tag**: Clear visual confirmation that all panes are rendering direct database queries.
 - **Audit Domain Pill**: Shows total audited domains and live record counts.
 - **Verify Parity Button**: Triggers a verification check with visual feedback.
 
 ### 2. Domain & Record Selector
-- **Primary Domain Tabs**: Jump directly between flagship domains:
-  - `Students` (Complex nested enrollments + guardian JSONB)
-  - `Fees` (Fee definitions & discount structures)
-  - `Transactions` (Financial ledgers with installment arrays)
-  - `Courses` (Academic courses and curricula)
-- **All 42 Domains Dropdown**: Instant access to any of the 42 migrated tables.
+- **Dynamic Domain Tabs**: Inspect discovered live business collections.
+- **Discovered Domains Dropdown**: Instant access to all collections and tables discovered live across both databases.
 - **Record Pagination**: Step forwards and backwards (`<` `>`) through individual live records.
-- **View Mode Switcher**: Toggle between **Dual Panes** and **Transformation Matrix**.
 
-### 3. Parity Status Bar & Diff Modal
+### 3. Parity Status Bar
 - Displays:
   - Live RavenDB document count
   - Live PostgreSQL row count
   - Match count & missing/extra record alerts
-  - Primary Key type mapping (e.g. `String ID` ➔ `UUID`)
-- **"Inspect Diff" Button**: Launches an inline diff inspector comparing live JSON key mappings.
+  - Clean status badge (100% MATCH or AWAITING SYNC)
 
 ### 4. Dual-Pane Split View
 - **Left Pane (RavenDB Document Store)**:
   - `Document JSON`: Formatted JSON payload with syntax colorization.
-  - `@metadata`: CLR type (`CampusTrack.Domain.*`), Change Vectors, and timestamps.
+  - `@metadata`: CLR type, Change Vectors, and timestamps.
   - `RQL Query`: The exact RavenDB Query Language query used to fetch the document.
   - `Source Stats`: Collection size, document counts, and storage metrics.
   - `Copy`: 1-click clipboard button.
 - **Right Pane (PostgreSQL Relational + JSONB)**:
   - `Row Columns`: Tabular view of all relational columns, showing column names, inferred data types, and values.
-  - `JSONB Columns`: Dedicated explorer for JSONB attributes (e.g. `enrollments`, `guardian_details`) with nested expand/collapse controls.
+  - `JSONB Columns`: Dedicated explorer for JSONB attributes with nested expand/collapse controls.
   - `Table DDL`: Live generated PostgreSQL `CREATE TABLE` and `CREATE INDEX` schema.
   - `SQL Query`: The corresponding SQL query.
   - `Triggers`: PostgreSQL trigger functions (e.g., automatic `modified_on` timestamp updates).
 
-### 5. Live Transformation Matrix
-- Field-by-field mapping rows showing:
-  - **Source Field**: Field name and data type in RavenDB.
-  - **Target Column**: PostgreSQL column and data type.
-  - **Transform Rule Applied**:
-    - `uuid_parse`: Converts RavenDB string IDs (`Students/1042-A`) to standard RFC 4122 UUIDs.
-    - `case_conversion`: PascalCase to snake_case mapping.
-    - `datetime_utc`: ISO strings to native PostgreSQL timestamps.
-    - `jsonb_lateral`: Nested sub-documents or arrays mapped to JSONB columns.
-  - **Before & After Values**: Visual comparison of transformed values.
-  - **Filter & Search**: Quick search box to find specific fields.
-
-### 6. AI Migration Copilot
+### 5. AI Migration Copilot
 Floating drawer in the bottom-right corner:
 - Interactive chat assistant with context of the currently selected domain.
 - **Quick Action Prompts**:
-  - `⚡ Schema Mapping`: Explains how the current collection's schema translates.
-  - `🔍 Parity Audit`: Analyzes records for data integrity.
+  - `⚡ Schema Mapping`: Generates and explains live DDL from PostgreSQL catalog.
+  - `🔍 Parity Audit`: Analyzes records for live data integrity.
   - `🔄 RQL ➔ SQL`: Demonstrates query conversion from RavenDB RQL to PostgreSQL SQL.
-  - `📊 JSONB LATERAL`: Generates a `LATERAL jsonb_array_elements` query to unnest arrays.
+  - `📊 JSONB LATERAL`: Explains PostgreSQL `LATERAL jsonb_array_elements` queries.
 
-### 7. 42-Domain Parity Audit Modal
-Clicking the header metric pill opens the complete audit matrix:
-- Lists all 42 migrated domains with **live RavenDB counts** and **live PostgreSQL counts**.
-- Displays verification status (`PASS`) and field parity.
+### 6. Live Parity Audit Modal
+Clicking the header metric pill opens the complete audit view:
+- Lists all discovered database domains with **live RavenDB counts** and **live PostgreSQL counts**.
+- Displays real-time parity verification status.
 
 ---
 
@@ -205,11 +186,11 @@ The live server runs on `http://localhost:3001`:
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/live/status` | Pings PostgreSQL, RavenDB Cloud, and .NET API; returns latency. |
-| `GET` | `/api/live/domains` | Returns all 42 domains with live document counts from RavenDB and PG. |
-| `GET` | `/api/live/raven/:collection?limit=25` | Queries live documents from RavenDB via `from "<Collection>" order by id()`. |
-| `GET` | `/api/live/postgres/:table?limit=25` | Queries live rows, dynamic DDL, column types, and triggers from PostgreSQL. |
+| `GET` | `/api/live/domains` | Returns all discovered domains with live document counts from RavenDB and PG. |
+| `GET` | `/api/live/raven/:collection?limit=all` | Queries live documents from RavenDB via `from "<Collection>" order by id()`. |
+| `GET` | `/api/live/postgres/:table?limit=all` | Queries live rows, dynamic DDL, column types, and triggers from PostgreSQL. |
 | `GET` | `/api/live/raven-doc?id=<doc_id>` | Fetches a single RavenDB document by its exact `@id`. |
-| `GET` | `/api/live/summary-view?limit=25` | Queries the PostgreSQL cross-module view `student_fee_summary_view`. |
+| `GET` | `/api/live/summary-view?limit=all` | Queries the PostgreSQL cross-module view `student_fee_summary_view`. |
 
 ---
 

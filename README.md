@@ -2,6 +2,9 @@
 
 A complete, production-ready demonstration of migrating school and fee management data from **RavenDB / SVC** to **PostgreSQL**, leveraging **PostgreSQL Normal Views with JSONB lateral extraction**, **High-Performance B-Tree & GIN Indexes**, **PostgreSQL Triggers**, and exposing an **ASP.NET Core 10 Web API** with Swagger UI and automated xUnit tests.
 
+
+> 🚀 **New to this project?** Follow the step-by-step **[Beginner's Quickstart Guide (QUICKSTART.md)](file:///c:/Users/aks89/Desktop/CT-RPG/QUICKSTART.md)** to configure your `.env`, run the migration via Docker, and launch the Live UI showcase in minutes.
+
 ---
 
 ## 📑 Table of Contents

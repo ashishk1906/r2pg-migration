@@ -49,7 +49,7 @@ cp .env.example .env
 | `PG_PASSWORD` | `<your-postgres-password>` | Target PostgreSQL password |
 | `RAVEN_URL` | `https://<cluster>.ravendb.cloud` | RavenDB Cloud URL |
 | `RAVEN_DB` | `BTL` | Source RavenDB database name |
-| `RAVEN_CERT_FILE` | `certs/free.btl.client.certificate.pfx` | Path to the RavenDB client certificate relative to the repository root |
+| `RAVEN_CERT_FILE` | `certs/<your-client-cert>.pfx` | Path to the RavenDB client certificate relative to the repository root |
 
 ---
 

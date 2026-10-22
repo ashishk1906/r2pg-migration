@@ -52,7 +52,7 @@ Copy your client `.pfx` certificate into:
 ```text
 scripts/certs/<your-client-cert>.pfx
 ```
-Ensure the filename matches `RAVEN_CERT_FILE` in your `.env` (e.g., `certs/free.btl.client.certificate.pfx`).
+Ensure the filename matches `RAVEN_CERT_FILE` in your `.env` (e.g., `certs/<your-client-cert>.pfx`).
 
 ---
 
